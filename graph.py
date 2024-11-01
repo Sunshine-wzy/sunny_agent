@@ -20,7 +20,11 @@ model = ChatZhipuAI(
 search_tool = TavilySearchResults(max_results=2)
 common_tools = [search_tool]
 
-group_tools = common_tools + [tool.group_name, tool.group_member_list]
+group_tools = common_tools + [
+    tool.group_name,
+    tool.group_member_list,
+    tool.send_private_message
+]
 private_tools = common_tools
 
 model_with_group_tools = model.bind_tools(group_tools)
