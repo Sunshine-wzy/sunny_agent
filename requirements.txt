@@ -1,0 +1,14 @@
+#pip install -r requirements.txt
+
+pyodbc
+tabulate
+openai
+langchain
+langchain-community
+langchain-core
+langchain-experimental
+langchain-openai
+langgraph
+pandas
+qianfan
+tavily-python
