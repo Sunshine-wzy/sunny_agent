@@ -7,7 +7,9 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig
 
-from .graph import graph
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, PrivateMessageEvent, Bot
+
+from .graph import group_graph, private_graph
 
 
 set_verbose(True)
@@ -23,20 +25,48 @@ chain = model | parser
 thread_chat_user_prompt = PromptTemplate.from_template("user(name={name},id={id}):{text}")
 
 
-async def thread_chat(thread_id: str, text: str, user_id: int, user_name: str | None) -> str:
-    config = RunnableConfig({"configurable": {"thread_id": thread_id}})
+async def group_chat(event: GroupMessageEvent, bot: Bot) -> str:
+    msg = event.message.__str__()
+    print(msg)
+    user_name = event.sender.card if event.sender.card else event.sender.nickname
+    
+    config = RunnableConfig({
+        "configurable": {
+            "thread_id": event.group_id,
+            "event": event,
+            "bot": bot
+        }
+    })
     message = HumanMessage(content=thread_chat_user_prompt.invoke(
-        {"name": user_name, "id": user_id, "text": text}
+        {"name": user_name, "id": event.user_id, "text": msg}
     ).to_string())
-    output = await graph.ainvoke({"messages": [message]}, config)
-    print("Output messages: " + output.__str__())
-    return parser.invoke(output["messages"][-1])
+    output = await group_graph.ainvoke({
+        "messages": [message]
+    }, config)
+    output_messages = output["messages"]
+    print("Output messages: " + output_messages.__str__())
+    return parser.invoke(output_messages[-1])
 
-async def group_chat(group_id: int, text: str, user_id: int, user_name: str | None) -> str:
-    return await thread_chat(f"g{group_id}", text, user_id, user_name)
-
-async def user_chat(text: str, user_id: int, user_name: str | None) -> str:
-    return await thread_chat(f"u{user_id}", text, user_id, user_name)
+async def private_chat(event: PrivateMessageEvent, bot: Bot) -> str:
+    msg = event.message.__str__()
+    print(msg)
+    
+    config = RunnableConfig({
+        "configurable": {
+            "thread_id": event.user_id,
+            "event": event,
+            "bot": bot
+        }
+    })
+    message = HumanMessage(content=thread_chat_user_prompt.invoke(
+        {"name": event.sender.nickname, "id": event.user_id, "text": msg}
+    ).to_string())
+    output = await private_graph.ainvoke({
+        "messages": [message]
+    }, config)
+    output_messages = output["messages"]
+    print("Output messages: " + output_messages.__str__())
+    return parser.invoke(output_messages[-1])
 
 
 translate_prompt_template = ChatPromptTemplate.from_messages(

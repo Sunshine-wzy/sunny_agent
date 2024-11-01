@@ -8,8 +8,9 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 
-from .state import State
+from .state import GroupState, PrivateState
 from .token_counter import trimmer
+from . import tool
 
 
 model = ChatZhipuAI(
@@ -17,10 +18,16 @@ model = ChatZhipuAI(
 )
 
 search_tool = TavilySearchResults(max_results=2)
-tools = [search_tool]
-model_with_tools = model.bind_tools(tools)
+common_tools = [search_tool]
 
-graph_builder = StateGraph(State)
+group_tools = common_tools + [tool.group_name, tool.group_member_list]
+private_tools = common_tools
+
+model_with_group_tools = model.bind_tools(group_tools)
+model_with_private_tools = model.bind_tools(private_tools)
+
+group_graph_builder = StateGraph(GroupState)
+private_graph_builder = StateGraph(PrivateState)
 
 chat_prompt = ChatPromptTemplate.from_messages(
     [
@@ -31,20 +38,37 @@ chat_prompt = ChatPromptTemplate.from_messages(
         MessagesPlaceholder(variable_name="messages")
     ]
 )
-chat_chain = chat_prompt | trimmer | model_with_tools
-
-def chatbot(state: State):
-    return {"messages": [chat_chain.invoke(state["messages"])]}
+group_chat_chain = chat_prompt | trimmer | model_with_group_tools
+private_chat_chain = chat_prompt | trimmer | model_with_private_tools
 
 
-graph_builder.add_node("chatbot", chatbot)
+def group_chatbot(state: GroupState):
+    return {"messages": [group_chat_chain.invoke(state["messages"])]}
 
-tool_node = ToolNode(tools=tools)
-graph_builder.add_node("tools", tool_node)
+def private_chatbot(state: PrivateState):
+    return {"messages": [private_chat_chain.invoke(state["messages"])]}
 
-graph_builder.add_conditional_edges("chatbot", tools_condition)
-graph_builder.add_edge("tools", "chatbot")
-graph_builder.set_entry_point("chatbot")
 
-memory_saver = MemorySaver()
-graph = graph_builder.compile(checkpointer=memory_saver)
+group_graph_builder.add_node("chatbot", group_chatbot)
+group_tool_node = ToolNode(tools=group_tools)
+group_graph_builder.add_node("tools", group_tool_node)
+group_graph_builder.add_conditional_edges("chatbot", tools_condition)
+group_graph_builder.add_edge("tools", "chatbot")
+group_graph_builder.set_entry_point("chatbot")
+
+private_graph_builder.add_node("chatbot", private_chatbot)
+private_tool_node = ToolNode(tools=private_tools)
+private_graph_builder.add_node("tools", private_tool_node)
+private_graph_builder.add_conditional_edges("chatbot", tools_condition)
+private_graph_builder.add_edge("tools", "chatbot")
+private_graph_builder.set_entry_point("chatbot")
+
+group_memory_saver = MemorySaver()
+group_graph = group_graph_builder.compile(
+    checkpointer=group_memory_saver
+)
+
+private_memory_saver = MemorySaver()
+private_graph = private_graph_builder.compile(
+    checkpointer=private_memory_saver
+)
