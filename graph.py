@@ -22,7 +22,7 @@ model_with_tools = model.bind_tools(tools)
 
 graph_builder = StateGraph(State)
 
-group_chat_prompt = ChatPromptTemplate.from_messages(
+chat_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
@@ -31,10 +31,10 @@ group_chat_prompt = ChatPromptTemplate.from_messages(
         MessagesPlaceholder(variable_name="messages")
     ]
 )
-group_chat_chain = group_chat_prompt | trimmer | model_with_tools
+chat_chain = chat_prompt | trimmer | model_with_tools
 
 def chatbot(state: State):
-    return {"messages": [group_chat_chain.invoke(state["messages"])]}
+    return {"messages": [chat_chain.invoke(state["messages"])]}
 
 
 graph_builder.add_node("chatbot", chatbot)
