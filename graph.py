@@ -14,7 +14,7 @@ from . import tool
 
 
 model = ChatZhipuAI(
-    model="glm-4-plus"
+    model="glm-4-air"
 )
 
 search_tool = TavilySearchResults(max_results=2)

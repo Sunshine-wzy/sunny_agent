@@ -16,7 +16,7 @@ set_verbose(True)
 # set_debug(True)
 
 model = ChatZhipuAI(
-    model="glm-4-plus"
+    model="glm-4-air"
 )
 
 parser = StrOutputParser()
