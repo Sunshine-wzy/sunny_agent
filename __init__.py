@@ -4,9 +4,11 @@ from nonebot.plugin import PluginMetadata
 
 from .config import Config
 from . import event
+from . import commands
 
 
 require("nonebot_plugin_localstore")
+require("nonebot_plugin_alconna")
 
 __plugin_meta__ = PluginMetadata(
     name="sunny_agent",

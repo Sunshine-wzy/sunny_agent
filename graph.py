@@ -1,7 +1,7 @@
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, SystemMessage, trim_messages
 
-from langchain_community.chat_models import ChatZhipuAI
+from langchain_community.chat_models import QianfanChatEndpoint
 from langchain_community.tools.tavily_search import TavilySearchResults
 
 from langgraph.graph import StateGraph, START, END
@@ -13,9 +13,7 @@ from .token_counter import trimmer
 from . import tool
 
 
-model = ChatZhipuAI(
-    model="glm-4-air"
-)
+model = QianfanChatEndpoint(model="qwen3-235b-a22b", timeout=3000)
 
 search_tool = TavilySearchResults(max_results=2)
 common_tools = [search_tool]

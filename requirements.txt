@@ -12,3 +12,4 @@ langgraph
 pandas
 qianfan
 tavily-python
+mem0ai
