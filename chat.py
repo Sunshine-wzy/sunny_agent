@@ -1,3 +1,4 @@
+from typing import Any
 from langchain.globals import set_verbose, set_debug
 
 from langchain_community.chat_models import QianfanChatEndpoint
@@ -22,11 +23,6 @@ parser = StrOutputParser()
 chain = model | parser
 
 thread_chat_user_prompt = PromptTemplate.from_template("user(name={name},id={id}):{text}")
-thread_chat_with_mem_user_prompt = PromptTemplate.from_template("""# User Memories
-{memories}
-# user(name={name},id={id}):
-{text}
-""")
 
 role_mapping = {
     'human': 'user',
@@ -42,10 +38,12 @@ def convert_messages_to_dict(messages):
     # 转换为标准聊天格式
     chat_format = []
     for msg in dict_messages:
-        chat_format.append({
-            "role": role_mapping.get(msg['type'], 'user'),
-            "content": str(msg['data']['content'])
-        })
+        role = role_mapping.get(msg['type'])
+        if role is not None:
+            chat_format.append({
+                "role": role,
+                "content": str(msg['data']['content'])
+            })
     
     return chat_format
 
@@ -61,21 +59,19 @@ async def group_chat(event: GroupMessageEvent, bot: Bot, mem_enabled: bool) -> s
         }
     })
     
+    message = HumanMessage(content=thread_chat_user_prompt.invoke(
+        {"name": user_name, "id": event.user_id, "text": msg}
+    ).to_string())
+    input_data: dict[str, Any] = {"messages": [message], "memories": None}
+    
     if mem_enabled:
         mem_user_id = f"u{event.sender.user_id}"
-        relevant_memories = memory.search(query=msg, user_id=mem_user_id, limit=3)
+        relevant_memories = memory.search(query=msg, user_id=mem_user_id, limit=5)
         memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
-        message = HumanMessage(content=thread_chat_with_mem_user_prompt.invoke(
-            {"name": user_name, "id": event.user_id, "text": msg, "memories": memories_str}
-        ).to_string())
-    else:
-        message = HumanMessage(content=thread_chat_user_prompt.invoke(
-            {"name": user_name, "id": event.user_id, "text": msg}
-        ).to_string())
+        input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
+        print(f"Memories ({mem_user_id}): {memories_str}")
     
-    output = await group_graph.ainvoke({
-        "messages": [message]
-    }, config)
+    output = await group_graph.ainvoke(input_data, config)
     output_messages = output["messages"]
     dict_messages = convert_messages_to_dict(output_messages)
     print(f"Output messages: {dict_messages}")
@@ -96,21 +92,19 @@ async def private_chat(event: PrivateMessageEvent, bot: Bot, mem_enabled: bool) 
         }
     })
     
+    message = HumanMessage(content=thread_chat_user_prompt.invoke(
+        {"name": event.sender.nickname, "id": event.user_id, "text": msg}
+    ).to_string())
+    input_data: dict[str, Any] = {"messages": [message], "memories": None}
+    
     if mem_enabled:
         mem_user_id = f"u{event.user_id}"
-        relevant_memories = memory.search(query=msg, user_id=mem_user_id, limit=3)
+        relevant_memories = memory.search(query=msg, user_id=mem_user_id, limit=5)
         memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
-        message = HumanMessage(content=thread_chat_with_mem_user_prompt.invoke(
-            {"name": event.sender.nickname, "id": event.user_id, "text": msg, "memories": memories_str}
-        ).to_string())
-    else:
-        message = HumanMessage(content=thread_chat_user_prompt.invoke(
-            {"name": event.sender.nickname, "id": event.user_id, "text": msg}
-        ).to_string())
+        input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
+        print(f"Memories ({mem_user_id}): {memories_str}")
     
-    output = await private_graph.ainvoke({
-        "messages": [message]
-    }, config)
+    output = await private_graph.ainvoke(input_data, config)
     output_messages = output["messages"]
     dict_messages = convert_messages_to_dict(output_messages)
     print(f"Output messages: {dict_messages}")
