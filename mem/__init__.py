@@ -43,7 +43,8 @@ async def get_memory() -> AsyncMemory:
 async def add_memory(messages, user_id: str):
     memory = await get_memory()
     try:
-        await memory.add(messages, user_id=user_id)
+        result = await memory.add(messages, user_id=user_id)
         print(f"Memory added successfully ({user_id})")
+        return result
     except Exception as e:
         print(f"Failed to add memory ({user_id}): {e}")

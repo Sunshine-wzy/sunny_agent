@@ -50,7 +50,7 @@ async def search_user_memories(
     mem_user_id = f"u{user_id}"
     relevant_memories = await memory.search(query=query, user_id=mem_user_id, limit=10)
     memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
-    print(f"Memories ({mem_user_id}): {memories_str}")
+    print(f"Search User Memories ({mem_user_id}): {memories_str}")
     return memories_str if memories_str.strip() else "暂无相关记忆信息"
 
 @tool
@@ -62,5 +62,5 @@ async def list_user_memories(
     mem_user_id = f"u{user_id}"
     relevant_memories = await memory.get_all(user_id=mem_user_id, limit=20)
     memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
-    print(f"Memories ({mem_user_id}): {memories_str}")
+    print(f"List User Memories ({mem_user_id}): {memories_str}")
     return memories_str if memories_str.strip() else "暂无相关记忆信息"
