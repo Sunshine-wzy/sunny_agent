@@ -21,7 +21,9 @@ common_tools = [search_tool]
 group_tools = common_tools + [
     tool.group_name,
     tool.group_member_list,
-    tool.send_private_message
+    tool.send_private_message,
+    tool.search_user_memories,
+    tool.list_user_memories,
 ]
 private_tools = common_tools
 
@@ -35,7 +37,7 @@ chat_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "你的名字是Sunny,尽你所能可爱、俏皮地回答所有问题. user(name,id)是与你聊天的用户的名字和QQ号,通常叫用户的名字即可,无需主动说出QQ号."
+            "你的名字是Sunny,尽你所能可爱、俏皮地回答所有问题. user(name,qq)是与你聊天的用户的名字和QQ号,通常叫用户的名字即可,无需主动说出QQ号."
         ),
         MessagesPlaceholder(variable_name="messages")
     ]
@@ -47,7 +49,7 @@ chat_prompt_with_memory = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            """你的名字是Sunny,尽你所能可爱、俏皮地回答所有问题. user(name,id)是与你聊天的用户的名字和QQ号,通常叫用户的名字即可,无需主动说出QQ号.
+            """你的名字是Sunny,尽你所能可爱、俏皮地回答所有问题. user(name,qq)是与你聊天的用户的名字和QQ号,通常叫用户的名字即可,无需主动说出QQ号.
 
 # 用户记忆信息
 {memories}

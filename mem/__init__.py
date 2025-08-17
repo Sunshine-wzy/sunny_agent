@@ -1,4 +1,5 @@
-from mem0 import Memory
+from typing import Optional
+from mem0 import AsyncMemory
 from openai import OpenAI
 
 
@@ -29,4 +30,20 @@ config = {
 }
 
 openai_client = OpenAI()
-memory = Memory.from_config(config)
+_memory_instance: Optional[AsyncMemory] = None
+
+
+async def get_memory() -> AsyncMemory:
+    """获取内存实例，如果不存在则创建"""
+    global _memory_instance
+    if _memory_instance is None:
+        _memory_instance = await AsyncMemory.from_config(config)
+    return _memory_instance
+
+async def add_memory(messages, user_id: str):
+    memory = await get_memory()
+    try:
+        await memory.add(messages, user_id=user_id)
+        print(f"Memory added successfully ({user_id})")
+    except Exception as e:
+        print(f"Failed to add memory ({user_id}): {e}")

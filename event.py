@@ -1,9 +1,10 @@
+import asyncio
 from nonebot import on_message
 from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
 
 from . import chat
-from .mem import memory
+from .mem import add_memory
 from .mem.group_mem import get_group_mem_enabled
 
 
@@ -36,5 +37,5 @@ async def handle_mem_group(event: GroupMessageEvent):
         user_id = event.sender.user_id
         if user_id:
             mem_user_id = f"u{user_id}"
-            memory.add(event.message.__str__(), user_id=mem_user_id)
+            asyncio.create_task(add_memory(event.message.__str__(), user_id=mem_user_id))
     await mem.finish()
