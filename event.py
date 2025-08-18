@@ -19,8 +19,7 @@ async def handle_llm_group(event: GroupMessageEvent, bot: Bot):
     if first_msg.is_text() and first_msg.data.get("text", "").startswith("/"):
         await llm.finish()
     
-    mem_enabled = get_group_mem_enabled(event.group_id)
-    response = await chat.group_chat(event, bot, mem_enabled)
+    response = await chat.group_chat(event, bot, True)
     await llm.finish(response)
 
 @llm.handle()
