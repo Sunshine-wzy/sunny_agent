@@ -76,7 +76,7 @@ def set_group_mem_enabled(group_id: int, enabled: bool):
 def get_group_mem(group_id: int) -> Optional[GroupMem]:
     return group_mems.get(str(group_id))
 
-def get_group_mem_enabled(group_id: int) -> bool:
+def is_group_mem_enabled(group_id: int) -> bool:
     group_mem = get_group_mem(group_id)
     if group_mem:
         return group_mem.enabled

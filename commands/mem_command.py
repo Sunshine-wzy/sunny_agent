@@ -3,7 +3,7 @@ from arclet.alconna import Alconna, Args
 from nonebot.adapters.onebot.v11 import GroupMessageEvent
 from nonebot_plugin_alconna import Match, Option, Subcommand, on_alconna
 
-from ..mem.group_mem import get_group_mem_enabled, set_group_mem_enabled
+from ..mem.group_mem import is_group_mem_enabled, set_group_mem_enabled
 from ..mem.knowledge_base import (
     add_knowledge_to_group,
     remove_knowledge_from_group,
@@ -46,7 +46,7 @@ mem = on_alconna(
 
 @mem.assign("$main")
 async def handle_mem_main(event: GroupMessageEvent):
-    await mem.finish(f"记忆是否开启: {get_group_mem_enabled(event.group_id)}")
+    await mem.finish(f"记忆是否开启: {is_group_mem_enabled(event.group_id)}")
 
 @mem.assign("open")
 async def handle_mem_open(event: GroupMessageEvent):

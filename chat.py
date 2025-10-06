@@ -2,7 +2,7 @@ import asyncio
 from typing import Any
 from langchain.globals import set_verbose, set_debug
 
-from langchain_community.chat_models import QianfanChatEndpoint
+from langchain_community.chat_models import ChatZhipuAI
 
 from langchain_core.messages import HumanMessage, messages_to_dict
 from langchain_core.output_parsers import StrOutputParser
@@ -18,7 +18,7 @@ from .mem import get_memory, add_memory
 set_verbose(True)
 # set_debug(True)
 
-model = QianfanChatEndpoint(model="qwen3-235b-a22b", timeout=3000)
+model = ChatZhipuAI(model="glm-4.5-flash")
 
 parser = StrOutputParser()
 chain = model | parser

@@ -40,7 +40,7 @@ def tiktoken_counter(messages: List[BaseMessage]) -> int:
 
 
 trimmer = trim_messages(
-    max_tokens=5000,
+    max_tokens=3000,
     strategy="last",
     token_counter=tiktoken_counter,
     include_system=True,
