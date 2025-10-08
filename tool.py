@@ -6,6 +6,7 @@ from nonebot.adapters.onebot.v11 import Bot
 from typing import Annotated
 
 from .mem import get_memory
+from .sora.sora_task import request_sora
 
 
 @tool
@@ -64,3 +65,18 @@ async def list_user_memories(
     memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
     print(f"List User Memories ({mem_user_id}): {memories_str}")
     return memories_str if memories_str.strip() else "暂无相关记忆信息"
+
+@tool
+async def generate_video_sora(
+    prompt: Annotated[str, "the prompt to generate the video"],
+    config: RunnableConfig
+):
+    """Generates a video by sora-2"""
+    conf = config["configurable"] # type: ignore
+    bot: Bot = conf["bot"]
+    event = conf["event"]
+    group_id = event.group_id
+    await request_sora(
+        prompt, lambda msg: bot.send_group_msg(group_id=group_id, message=msg)
+    )
+    return f"The video was generated successfully (prompt: {prompt})"

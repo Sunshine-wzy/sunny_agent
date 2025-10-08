@@ -24,6 +24,7 @@ group_tools = common_tools + [
     tool.send_private_message,
     tool.search_user_memories,
     tool.list_user_memories,
+    tool.generate_video_sora,
 ]
 private_tools = common_tools
 

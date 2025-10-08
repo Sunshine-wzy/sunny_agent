@@ -85,6 +85,6 @@ async def handle_sora_group(event: GroupMessageEvent):
         if prompt:
             print(f"[Sora] 来自群 {event.group_id}: {prompt}")
             # await sora.send(f"🎨 收到 Sora Prompt: {prompt}")
-            await request_sora(sora, prompt)
+            await request_sora(prompt, lambda msg: sora.send(msg))
         else:
             await sora.finish("请输入要生成的内容，如 /sora 一只小狗在天空中玩耍")
