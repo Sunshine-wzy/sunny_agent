@@ -2,7 +2,7 @@ import asyncio
 import random
 from nonebot import on_message
 from nonebot.rule import to_me
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
 
 from . import chat
 from .mem import add_memory
@@ -16,10 +16,17 @@ mem = on_message(priority=15, block=False)
 sora = on_message(rule=to_me(), priority=15, block=False)
 
 
+def _is_command_message(event: GroupMessageEvent | PrivateMessageEvent) -> bool:
+    if not event.message:
+        return False
+
+    first_msg = event.message[0]
+    return first_msg.is_text() and first_msg.data.get("text", "").startswith("/")
+
+
 @llm.handle()
 async def handle_llm_group(event: GroupMessageEvent, bot: Bot):
-    first_msg = event.message[0]
-    if first_msg.is_text() and first_msg.data.get("text", "").startswith("/"):
+    if _is_command_message(event):
         await llm.finish()
     
     response = await chat.group_chat(event, bot, True)
@@ -27,9 +34,9 @@ async def handle_llm_group(event: GroupMessageEvent, bot: Bot):
 
 @llm.handle()
 async def handle_llm_user(event: PrivateMessageEvent, bot: Bot):
-    first_msg = event.message[0]
-    if first_msg.is_text() and first_msg.data.get("text", "").startswith("/"):
+    if _is_command_message(event):
         await llm.finish()
+    
     response = await chat.private_chat(event, bot, True)
     await llm.finish(response)
 

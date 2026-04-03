@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, List
 from langchain_core.messages import BaseMessage, ToolMessage, HumanMessage, AIMessage, SystemMessage, trim_messages
 
 import tiktoken
@@ -7,6 +7,35 @@ import tiktoken
 def str_token_counter(text: str) -> int:
     enc = tiktoken.get_encoding("o200k_base")
     return len(enc.encode(text))
+
+
+def message_content_token_counter(content: str | list[Any]) -> int:
+    if isinstance(content, str):
+        return str_token_counter(content)
+
+    num_tokens = 0
+    for block in content:
+        if isinstance(block, str):
+            num_tokens += str_token_counter(block)
+            continue
+
+        if not isinstance(block, dict):
+            num_tokens += str_token_counter(str(block))
+            continue
+
+        if block.get("type") == "text":
+            num_tokens += str_token_counter(block.get("text", ""))
+            continue
+
+        if block.get("type") == "image_url":
+            # Image token cost is model-specific; use a small fixed estimate so
+            # multimodal messages can still participate in history trimming.
+            num_tokens += 256
+            continue
+
+        num_tokens += str_token_counter(str(block))
+
+    return num_tokens
 
 
 def tiktoken_counter(messages: List[BaseMessage]) -> int:
@@ -31,7 +60,7 @@ def tiktoken_counter(messages: List[BaseMessage]) -> int:
         num_tokens += (
             tokens_per_message
             + str_token_counter(role)
-            + str_token_counter(msg.content) # type: ignore
+            + message_content_token_counter(msg.content) # type: ignore
         )
         if msg.name:
             num_tokens += tokens_per_name + str_token_counter(msg.name)
@@ -40,7 +69,7 @@ def tiktoken_counter(messages: List[BaseMessage]) -> int:
 
 
 trimmer = trim_messages(
-    max_tokens=3000,
+    max_tokens=100000,
     strategy="last",
     token_counter=tiktoken_counter,
     include_system=True,
