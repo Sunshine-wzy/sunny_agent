@@ -123,12 +123,12 @@ async def _build_human_message(event: MessageEvent, bot: Bot, user_name: str) ->
         if fallback_text:
             content.append({"type": "text", "text": fallback_text})
 
-    return HumanMessage(content=content)
+    return HumanMessage(content=content) # type: ignore
 
 async def group_chat(event: GroupMessageEvent, bot: Bot, mem_enabled: bool) -> str:
     msg = event.message.__str__()
     print(msg)
-    user_name = event.sender.card if event.sender.card else event.sender.nickname
+    user_name = event.sender.card if event.sender.card else event.sender.nickname or "Unknown"
     config = RunnableConfig({
         "configurable": {
             "thread_id": event.group_id,
@@ -153,7 +153,7 @@ async def group_chat(event: GroupMessageEvent, bot: Bot, mem_enabled: bool) -> s
     #     input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
     #     print(f"Group Chat Memories ({mem_user_id}): {memories_str}")
     
-    output = await group_graph.ainvoke(input_data, config)
+    output = await group_graph.ainvoke(input_data, config) # type: ignore
     output_messages = output["messages"]
     dict_messages = convert_messages_to_dict(output_messages)
     print(f"Output messages: {dict_messages}")
@@ -185,7 +185,7 @@ async def private_chat(event: PrivateMessageEvent, bot: Bot, mem_enabled: bool) 
         }
     })
     
-    message = await _build_human_message(event, bot, event.sender.nickname)
+    message = await _build_human_message(event, bot, event.sender.nickname or "Unknown")
     input_data: dict[str, Any] = {"messages": [message], "memories": None}
     
     # if mem_enabled:
@@ -196,7 +196,7 @@ async def private_chat(event: PrivateMessageEvent, bot: Bot, mem_enabled: bool) 
     #     input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
     #     print(f"Private Chat Memories ({mem_user_id}): {memories_str}")
     
-    output = await private_graph.ainvoke(input_data, config)
+    output = await private_graph.ainvoke(input_data, config) # type: ignore
     output_messages = output["messages"]
     dict_messages = convert_messages_to_dict(output_messages)
     print(f"Output messages: {dict_messages}")
