@@ -1,6 +1,6 @@
 import asyncio
 from typing import Any
-from langchain.globals import set_verbose, set_debug
+from langchain_core.globals import set_verbose, set_debug
 
 from langchain_community.chat_models import ChatZhipuAI
 
