@@ -131,7 +131,7 @@ async def group_chat(event: GroupMessageEvent, bot: Bot, mem_enabled: bool) -> s
     user_name = event.sender.card if event.sender.card else event.sender.nickname or "Unknown"
     config = RunnableConfig({
         "configurable": {
-            "thread_id": event.group_id,
+            "thread_id": str(event.group_id),
             "event": event,
             "bot": bot
         }
@@ -179,7 +179,7 @@ async def private_chat(event: PrivateMessageEvent, bot: Bot, mem_enabled: bool) 
     print(msg)
     config = RunnableConfig({
         "configurable": {
-            "thread_id": event.user_id,
+            "thread_id": str(event.user_id),
             "event": event,
             "bot": bot
         }

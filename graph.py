@@ -133,7 +133,6 @@ async def _clear_thread_history(memory_saver: MemorySaver, thread_id: str | int)
     for candidate in candidates:
         try:
             await _delete_thread(memory_saver, candidate)
-            return
         except Exception as exc:
             last_error = exc
 
