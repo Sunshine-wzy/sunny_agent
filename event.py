@@ -5,6 +5,7 @@ from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
 
 from . import chat
+from .graph import clear_group_history, clear_private_history
 from .mem import add_memory
 from .mem.group_mem import is_group_mem_enabled
 from .sora.group_sora import is_group_sora_enabled, set_group_sora_enabled
@@ -14,18 +15,39 @@ from .sora.sora_task import request_sora
 llm = on_message(rule=to_me(), priority=10, block=False)
 mem = on_message(priority=15, block=False)
 sora = on_message(rule=to_me(), priority=15, block=False)
+CLEAR_CONTEXT_COMMANDS = {"/clear"}
+
+
+def _get_first_command(event: GroupMessageEvent | PrivateMessageEvent) -> str | None:
+    if not event.message:
+        return None
+
+    first_msg = event.message[0]
+    if not first_msg.is_text():
+        return None
+
+    text = first_msg.data.get("text", "").strip()
+    if not text.startswith("/"):
+        return None
+
+    return text.split(maxsplit=1)[0].lower()
 
 
 def _is_command_message(event: GroupMessageEvent | PrivateMessageEvent) -> bool:
-    if not event.message:
-        return False
-
-    first_msg = event.message[0]
-    return first_msg.is_text() and first_msg.data.get("text", "").startswith("/")
+    return _get_first_command(event) is not None
 
 
 @llm.handle()
 async def handle_llm_group(event: GroupMessageEvent, bot: Bot):
+    command = _get_first_command(event)
+    if command in CLEAR_CONTEXT_COMMANDS:
+        try:
+            await clear_group_history(event.group_id)
+        except Exception as exc:
+            print(f"Failed to clear group context {event.group_id}: {exc}")
+            await llm.finish("Failed to clear context.")
+        await llm.finish("Context cleared.")
+
     if _is_command_message(event):
         await llm.finish()
     
@@ -34,9 +56,18 @@ async def handle_llm_group(event: GroupMessageEvent, bot: Bot):
 
 @llm.handle()
 async def handle_llm_user(event: PrivateMessageEvent, bot: Bot):
+    command = _get_first_command(event)
+    if command in CLEAR_CONTEXT_COMMANDS:
+        try:
+            await clear_private_history(event.user_id)
+        except Exception as exc:
+            print(f"Failed to clear private context {event.user_id}: {exc}")
+            await llm.finish("Failed to clear context.")
+        await llm.finish("Context cleared.")
+
     if _is_command_message(event):
         await llm.finish()
-    
+
     response = await chat.private_chat(event, bot, True)
     await llm.finish(response)
 

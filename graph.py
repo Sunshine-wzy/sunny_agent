@@ -1,3 +1,5 @@
+import asyncio
+
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, SystemMessage, trim_messages
 
@@ -111,3 +113,37 @@ private_memory_saver = MemorySaver()
 private_graph = private_graph_builder.compile(
     checkpointer=private_memory_saver
 )
+
+
+async def _delete_thread(memory_saver: MemorySaver, thread_id: str | int) -> None:
+    if hasattr(memory_saver, "adelete_thread"):
+        await memory_saver.adelete_thread(thread_id)
+        return
+
+    await asyncio.to_thread(memory_saver.delete_thread, thread_id)
+
+
+async def _clear_thread_history(memory_saver: MemorySaver, thread_id: str | int) -> None:
+    candidates = [thread_id]
+    thread_id_str = str(thread_id)
+    if thread_id_str != thread_id:
+        candidates.append(thread_id_str)
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            await _delete_thread(memory_saver, candidate)
+            return
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+
+
+async def clear_group_history(group_id: int) -> None:
+    await _clear_thread_history(group_memory_saver, group_id)
+
+
+async def clear_private_history(user_id: int) -> None:
+    await _clear_thread_history(private_memory_saver, user_id)
