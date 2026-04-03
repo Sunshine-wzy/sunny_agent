@@ -2,7 +2,7 @@ import asyncio
 from typing import Any
 from langchain_core.globals import set_verbose, set_debug
 
-from langchain_community.chat_models import ChatZhipuAI
+from langchain_ollama import ChatOllama
 
 from langchain_core.messages import HumanMessage, messages_to_dict
 from langchain_core.output_parsers import StrOutputParser
@@ -18,7 +18,11 @@ from .mem import get_memory, add_memory
 set_verbose(True)
 # set_debug(True)
 
-model = ChatZhipuAI(model="glm-4.5-flash")
+model = ChatOllama(
+    base_url="http://127.0.0.1:21434",
+    model="gemma4:e4b",
+    reasoning=True
+)
 
 parser = StrOutputParser()
 chain = model | parser
@@ -57,37 +61,37 @@ async def group_chat(event: GroupMessageEvent, bot: Bot, mem_enabled: bool) -> s
     ).to_string())
     input_data: dict[str, Any] = {"messages": [message], "memories": None}
     
-    if mem_enabled:
-        memory = await get_memory()
-        mem_user_id = f"u{event.sender.user_id}"
-        mem_group_id = f"g{event.group_id}"
+    # if mem_enabled:
+    #     memory = await get_memory()
+    #     mem_user_id = f"u{event.sender.user_id}"
+    #     mem_group_id = f"g{event.group_id}"
         
-        relevant_user_memories = await memory.search(query=msg, user_id=mem_user_id, limit=5)
-        relevant_group_memories = await memory.search(query=msg, user_id=mem_group_id, limit=5)
-        all_memories = relevant_user_memories["results"] + relevant_group_memories["results"]
+    #     relevant_user_memories = await memory.search(query=msg, user_id=mem_user_id, limit=5)
+    #     relevant_group_memories = await memory.search(query=msg, user_id=mem_group_id, limit=5)
+    #     all_memories = relevant_user_memories["results"] + relevant_group_memories["results"]
         
-        memories_str = "\n".join(f"- {entry['memory']}" for entry in all_memories)
-        input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
-        print(f"Group Chat Memories ({mem_user_id}): {memories_str}")
+    #     memories_str = "\n".join(f"- {entry['memory']}" for entry in all_memories)
+    #     input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
+    #     print(f"Group Chat Memories ({mem_user_id}): {memories_str}")
     
     output = await group_graph.ainvoke(input_data, config)
     output_messages = output["messages"]
     dict_messages = convert_messages_to_dict(output_messages)
     print(f"Output messages: {dict_messages}")
     
-    if mem_enabled:
-        current_conversation = [
-            {
-                "role": "user",
-                "content": msg
-            },
-            {
-                "role": "assistant",
-                "content": dict_messages[-1]["content"]
-            }
-        ]
-        asyncio.create_task(add_memory(current_conversation, user_id=mem_user_id))
-        print(f"Current conversation: {current_conversation}")
+    # if mem_enabled:
+    #     current_conversation = [
+    #         {
+    #             "role": "user",
+    #             "content": msg
+    #         },
+    #         {
+    #             "role": "assistant",
+    #             "content": dict_messages[-1]["content"]
+    #         }
+    #     ]
+    #     asyncio.create_task(add_memory(current_conversation, user_id=mem_user_id))
+    #     print(f"Current conversation: {current_conversation}")
     
     return parser.invoke(output_messages[-1])
 
@@ -107,32 +111,32 @@ async def private_chat(event: PrivateMessageEvent, bot: Bot, mem_enabled: bool) 
     ).to_string())
     input_data: dict[str, Any] = {"messages": [message], "memories": None}
     
-    if mem_enabled:
-        memory = await get_memory()
-        mem_user_id = f"u{event.user_id}"
-        relevant_memories = await memory.search(query=msg, user_id=mem_user_id, limit=5)
-        memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
-        input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
-        print(f"Private Chat Memories ({mem_user_id}): {memories_str}")
+    # if mem_enabled:
+    #     memory = await get_memory()
+    #     mem_user_id = f"u{event.user_id}"
+    #     relevant_memories = await memory.search(query=msg, user_id=mem_user_id, limit=5)
+    #     memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
+    #     input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
+    #     print(f"Private Chat Memories ({mem_user_id}): {memories_str}")
     
     output = await private_graph.ainvoke(input_data, config)
     output_messages = output["messages"]
     dict_messages = convert_messages_to_dict(output_messages)
     print(f"Output messages: {dict_messages}")
     
-    if mem_enabled:
-        current_conversation = [
-            {
-                "role": "user",
-                "content": msg
-            },
-            {
-                "role": "assistant",
-                "content": dict_messages[-1]["content"]
-            }
-        ]
-        asyncio.create_task(add_memory(current_conversation, user_id=mem_user_id))
-        print(f"Current conversation: {current_conversation}")
+    # if mem_enabled:
+    #     current_conversation = [
+    #         {
+    #             "role": "user",
+    #             "content": msg
+    #         },
+    #         {
+    #             "role": "assistant",
+    #             "content": dict_messages[-1]["content"]
+    #         }
+    #     ]
+    #     asyncio.create_task(add_memory(current_conversation, user_id=mem_user_id))
+    #     print(f"Current conversation: {current_conversation}")
     
     return parser.invoke(output_messages[-1])
 

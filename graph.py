@@ -1,6 +1,8 @@
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, SystemMessage, trim_messages
 
+from langchain_ollama import ChatOllama
+
 from langchain_community.chat_models import QianfanChatEndpoint
 from langchain_community.tools.tavily_search import TavilySearchResults
 
@@ -13,7 +15,11 @@ from .token_counter import trimmer
 from . import tool
 
 
-model = QianfanChatEndpoint(model="qwen3-235b-a22b", timeout=3000)
+model = ChatOllama(
+    base_url="http://127.0.0.1:21434",
+    model="gemma4:e4b",
+    reasoning=True
+)
 
 search_tool = TavilySearchResults(max_results=2)
 common_tools = [search_tool]
@@ -24,7 +30,6 @@ group_tools = common_tools + [
     tool.send_private_message,
     tool.search_user_memories,
     tool.list_user_memories,
-    tool.generate_video_sora,
 ]
 private_tools = common_tools
 
@@ -38,7 +43,7 @@ chat_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "你的名字是Sunny,尽你所能可爱、俏皮地回答所有问题. user(name,qq)是与你聊天的用户的名字和QQ号,通常叫用户的名字即可,无需主动说出QQ号."
+            "user(name,qq)是与你聊天的用户的名字和QQ号,通常叫用户的名字即可,无需主动说出QQ号."
         ),
         MessagesPlaceholder(variable_name="messages")
     ]
@@ -50,7 +55,7 @@ chat_prompt_with_memory = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            """你的名字是Sunny,尽你所能可爱、俏皮地回答所有问题. user(name,qq)是与你聊天的用户的名字和QQ号,通常叫用户的名字即可,无需主动说出QQ号.
+            """user(name,qq)是与你聊天的用户的名字和QQ号,通常叫用户的名字即可,无需主动说出QQ号.
 
 # 用户记忆信息
 {memories}
