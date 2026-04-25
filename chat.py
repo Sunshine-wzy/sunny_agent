@@ -3,54 +3,19 @@ import base64
 import mimetypes
 import urllib.request
 from typing import Any
-from langchain_core.globals import set_verbose, set_debug
 
-from langchain_ollama import ChatOllama
+from agents import Runner
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageSegment, PrivateMessageEvent
 
-from langchain_core.messages import HumanMessage, messages_to_dict
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables import RunnableConfig
-
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, PrivateMessageEvent, Bot, MessageSegment
-
-from .graph import group_graph, private_graph
+from .graph import run_group_chat, run_private_chat, translator_agent
 
 
-set_verbose(True)
-# set_debug(True)
-
-model = ChatOllama(
-    base_url="http://127.0.0.1:21434",
-    model="gemma4:e4b",
-    reasoning=True
-)
-
-parser = StrOutputParser()
-chain = model | parser
-
-thread_chat_user_prompt = PromptTemplate.from_template("user(name={name},qq={id}):{text}")
 IMAGE_TOKEN_HINT = "[user sent an image]"
 MessageEvent = GroupMessageEvent | PrivateMessageEvent
 
 
-def convert_messages_to_dict(messages):
-    # 转换为字典格式
-    dict_messages = messages_to_dict(messages)
-    
-    # 转换为标准聊天格式
-    chat_format = []
-    for msg in dict_messages:
-        chat_format.append({
-            "role": msg['type'],
-            "content": str(msg['data']['content'])
-        })
-    
-    return chat_format
-
-
 def _build_user_prompt(name: str, user_id: int, text: str) -> str:
-    return thread_chat_user_prompt.invoke({"name": name, "id": user_id, "text": text}).to_string()
+    return f"user(name={name},qq={user_id}):{text}"
 
 
 def _download_image_as_data_url(url: str, file_hint: str = "") -> str:
@@ -88,25 +53,29 @@ async def _build_image_block(segment: MessageSegment, bot: Bot) -> dict[str, Any
         print(f"Failed to download image {image_url}: {exc}")
         return None
 
-    return {"type": "image_url", "image_url": {"url": data_url}}
+    return {"type": "input_image", "image_url": data_url}
 
 
-async def _build_human_message(event: MessageEvent, bot: Bot, user_name: str) -> HumanMessage:
+async def _build_agent_input(
+    event: MessageEvent,
+    bot: Bot,
+    user_name: str,
+) -> str | list[dict[str, Any]]:
     raw_text = event.message.__str__()
     has_image = any(segment.type == "image" for segment in event.message)
 
     if not has_image:
-        return HumanMessage(content=_build_user_prompt(user_name, event.user_id, raw_text))
+        return _build_user_prompt(user_name, event.user_id, raw_text)
 
     content: list[dict[str, Any]] = [
-        {"type": "text", "text": _build_user_prompt(user_name, event.user_id, IMAGE_TOKEN_HINT)}
+        {"type": "input_text", "text": _build_user_prompt(user_name, event.user_id, IMAGE_TOKEN_HINT)}
     ]
 
     for segment in event.message:
         if segment.is_text():
             text = segment.data.get("text", "")
             if text:
-                content.append({"type": "text", "text": text})
+                content.append({"type": "input_text", "text": text})
             continue
 
         if segment.type == "image":
@@ -115,63 +84,41 @@ async def _build_human_message(event: MessageEvent, bot: Bot, user_name: str) ->
                 content.append(image_block)
                 continue
 
-            content.append({"type": "text", "text": IMAGE_TOKEN_HINT})
+            content.append({"type": "input_text", "text": IMAGE_TOKEN_HINT})
             continue
 
         fallback_text = str(segment)
         if fallback_text:
-            content.append({"type": "text", "text": fallback_text})
+            content.append({"type": "input_text", "text": fallback_text})
 
-    return HumanMessage(content=content) # type: ignore
+    return [{"role": "user", "content": content}]
+
 
 async def group_chat(event: GroupMessageEvent, bot: Bot, mem_enabled: bool) -> str:
     msg = event.message.__str__()
     print(msg)
     user_name = event.sender.card if event.sender.card else event.sender.nickname or "Unknown"
-    config = RunnableConfig({
-        "configurable": {
-            "thread_id": str(event.group_id),
-            "event": event,
-            "bot": bot
-        }
-    })
-    
-    message = await _build_human_message(event, bot, user_name)
-    input_data: dict[str, Any] = {"messages": [message]}
-    
-    output = await group_graph.ainvoke(input_data, config) # type: ignore
-    output_messages = output["messages"]
-    dict_messages = convert_messages_to_dict(output_messages)
-    print(f"Output messages: {dict_messages}")
-    
-    return parser.invoke(output_messages[-1])
+    agent_input = await _build_agent_input(event, bot, user_name)
+    response = await run_group_chat(event, bot, agent_input)
+    print(f"Agent output: {response}")
+    return response
+
 
 async def private_chat(event: PrivateMessageEvent, bot: Bot, mem_enabled: bool) -> str:
     msg = event.message.__str__()
     print(msg)
-    config = RunnableConfig({
-        "configurable": {
-            "thread_id": str(event.user_id),
-            "event": event,
-            "bot": bot
-        }
-    })
-    
-    message = await _build_human_message(event, bot, event.sender.nickname or "Unknown")
-    input_data: dict[str, Any] = {"messages": [message]}
-    
-    output = await private_graph.ainvoke(input_data, config) # type: ignore
-    output_messages = output["messages"]
-    dict_messages = convert_messages_to_dict(output_messages)
-    print(f"Output messages: {dict_messages}")
-    
-    return parser.invoke(output_messages[-1])
+    user_name = event.sender.nickname or "Unknown"
+    agent_input = await _build_agent_input(event, bot, user_name)
+    response = await run_private_chat(event, bot, agent_input)
+    print(f"Agent output: {response}")
+    return response
 
 
-translate_prompt_template = ChatPromptTemplate.from_messages(
-    [("system", "Translate the following from Chinese into English"), ("user", "{text}")]
-)
-translate_chain = translate_prompt_template | chain
+async def atranslate(text: str) -> str:
+    result = await Runner.run(translator_agent, text)
+    return str(result.final_output or "")
+
 
 def translate(text: str) -> str:
-    return translate_chain.invoke({"text": text})
+    result = Runner.run_sync(translator_agent, text)
+    return str(result.final_output or "")
