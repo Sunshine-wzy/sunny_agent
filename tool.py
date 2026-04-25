@@ -5,8 +5,6 @@ from nonebot.adapters.onebot.v11 import Bot
 
 from typing import Annotated
 
-from .sora.sora_task import request_sora
-
 
 @tool
 async def group_name(config: RunnableConfig) -> str:
@@ -39,18 +37,3 @@ async def send_private_message(
     bot: Bot = conf["bot"]
     await bot.send_private_msg(user_id=user_id, message=message)
     return "The private chat message was sent successfully"
-
-# @tool
-# async def generate_video_sora(
-#     prompt: Annotated[str, "the prompt to generate the video"],
-#     config: RunnableConfig
-# ):
-#     """Generates a video by sora-2"""
-#     conf = config["configurable"] # type: ignore
-#     bot: Bot = conf["bot"]
-#     event = conf["event"]
-#     group_id = event.group_id
-#     await request_sora(
-#         prompt, lambda msg: bot.send_group_msg(group_id=group_id, message=msg)
-#     )
-#     return f"The video was generated successfully (prompt: {prompt})"

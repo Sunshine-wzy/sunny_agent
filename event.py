@@ -4,12 +4,9 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEv
 
 from . import chat
 from .graph import clear_group_history, clear_private_history
-from .sora.group_sora import is_group_sora_enabled, set_group_sora_enabled
-from .sora.sora_task import request_sora
 
 
 llm = on_message(rule=to_me(), priority=10, block=False)
-sora = on_message(rule=to_me(), priority=15, block=False)
 CLEAR_CONTEXT_COMMANDS = {"/clear"}
 
 
@@ -45,9 +42,10 @@ async def handle_llm_group(event: GroupMessageEvent, bot: Bot):
 
     if _is_command_message(event):
         await llm.finish()
-    
+
     response = await chat.group_chat(event, bot, True)
     await llm.finish(response)
+
 
 @llm.handle()
 async def handle_llm_user(event: PrivateMessageEvent, bot: Bot):
@@ -65,43 +63,3 @@ async def handle_llm_user(event: PrivateMessageEvent, bot: Bot):
 
     response = await chat.private_chat(event, bot, True)
     await llm.finish(response)
-
-
-# @sora.handle()
-# async def handle_sora_group(event: GroupMessageEvent):
-#     first_msg = event.message[0]
-#     if not first_msg.is_text():
-#         await sora.finish()
-
-#     text = first_msg.data.get("text", "").strip()
-#     if not text.startswith("/sora"):
-#         await sora.finish()
-
-#     parts = text.split(maxsplit=1)
-#     cmd = parts[0].lower()
-#     arg = parts[1].strip() if len(parts) > 1 else ""
-    
-#     if event.sender.user_id == 1123574549:
-#         arg_lower = arg.lower()
-        
-#         # /sora open
-#         if arg_lower == "open":
-#             set_group_sora_enabled(event.group_id, True)
-#             await sora.finish("✅ Sora 已开启")
-
-#         # /sora close
-#         elif arg_lower == "close":
-#             set_group_sora_enabled(event.group_id, False)
-#             await sora.finish("🈚 Sora 已关闭")
-
-#     # /sora {prompt}
-#     if not is_group_sora_enabled(event.group_id):
-#         await sora.finish("⚠️ 本群未开启 Sora 功能")
-#     else:
-#         prompt = arg
-#         if prompt:
-#             print(f"[Sora] 来自群 {event.group_id}: {prompt}")
-#             # await sora.send(f"🎨 收到 Sora Prompt: {prompt}")
-#             await request_sora(prompt, lambda msg: sora.send(msg))
-#         else:
-#             await sora.finish("请输入要生成的内容，如 /sora 一只小狗在天空中玩耍")
