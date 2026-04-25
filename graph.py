@@ -19,7 +19,7 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEv
 from . import tool
 
 
-MODEL_NAME = os.getenv("SUNNY_AGENT_MODEL", "gpt-5.5")
+MODEL_NAME = os.getenv("SUNNY_AGENT_MODEL", "gpt-5.4")
 MODEL_BASE_URL = os.getenv("SUNNY_AGENT_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
 MODEL_API_KEY = os.getenv("SUNNY_AGENT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 MAX_TURNS = int(os.getenv("SUNNY_AGENT_MAX_TURNS", "8"))
@@ -36,9 +36,6 @@ chat_instructions = (
 model_settings = ModelSettings()
 hosted_tools = [
     WebSearchTool(),
-    CodeInterpreterTool(
-        tool_config={"type": "code_interpreter", "container": {"type": "auto"}}
-    ),
     ImageGenerationTool(tool_config={"type": "image_generation"}),
 ]
 
