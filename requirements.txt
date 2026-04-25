@@ -4,5 +4,4 @@ pyodbc
 tabulate
 openai
 pandas
-tavily-python
 openai-agents

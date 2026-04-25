@@ -4,28 +4,29 @@ from typing import Any
 
 from agents import (
     Agent,
+    CodeInterpreterTool,
+    ImageGenerationTool,
     ModelSettings,
-    OpenAIChatCompletionsModel,
+    OpenAIProvider,
     RunConfig,
     Runner,
     SQLiteSession,
+    WebSearchTool,
     set_tracing_disabled,
 )
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
-from openai import AsyncOpenAI
 
 from . import tool
 
 
 MODEL_NAME = os.getenv("SUNNY_AGENT_MODEL", "gpt-5.5")
-MODEL_BASE_URL = os.getenv("SUNNY_AGENT_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "http://127.0.0.1:21434/v1"
-MODEL_API_KEY = os.getenv("SUNNY_AGENT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or "ollama"
+MODEL_BASE_URL = os.getenv("SUNNY_AGENT_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+MODEL_API_KEY = os.getenv("SUNNY_AGENT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 MAX_TURNS = int(os.getenv("SUNNY_AGENT_MAX_TURNS", "8"))
 
 set_tracing_disabled(disabled=os.getenv("SUNNY_AGENT_ENABLE_TRACING", "").lower() not in {"1", "true", "yes"})
 
-openai_client = AsyncOpenAI(api_key=MODEL_API_KEY, base_url=MODEL_BASE_URL)
-chat_model = OpenAIChatCompletionsModel(model=MODEL_NAME, openai_client=openai_client)
+model_provider = OpenAIProvider(api_key=MODEL_API_KEY, base_url=MODEL_BASE_URL, use_responses=True)
 
 chat_instructions = (
     "你是 Sunny，输入里的 user(name,qq) 表示正在和你聊天的用户姓名和 QQ 号。"
@@ -33,14 +34,21 @@ chat_instructions = (
 )
 
 model_settings = ModelSettings()
+hosted_tools = [
+    WebSearchTool(),
+    CodeInterpreterTool(
+        tool_config={"type": "code_interpreter", "container": {"type": "auto"}}
+    ),
+    ImageGenerationTool(tool_config={"type": "image_generation"}),
+]
 
 group_agent = Agent[tool.ChatContext](
     name="Sunny Group Agent",
     instructions=chat_instructions,
-    model=chat_model,
+    model=MODEL_NAME,
     model_settings=model_settings,
     tools=[
-        tool.web_search,
+        *hosted_tools,
         tool.group_name,
         tool.group_member_list,
         tool.send_private_message,
@@ -50,15 +58,15 @@ group_agent = Agent[tool.ChatContext](
 private_agent = Agent[tool.ChatContext](
     name="Sunny Private Agent",
     instructions=chat_instructions,
-    model=chat_model,
+    model=MODEL_NAME,
     model_settings=model_settings,
-    tools=[tool.web_search],
+    tools=hosted_tools,
 )
 
 translator_agent = Agent(
     name="Sunny Translator",
     instructions="Translate the user's Chinese text into English. Return only the translation.",
-    model=chat_model,
+    model=MODEL_NAME,
     model_settings=model_settings,
 )
 
@@ -95,7 +103,11 @@ async def _run_agent(
         context=tool.ChatContext(bot=bot, event=event),
         session=session,
         max_turns=MAX_TURNS,
-        run_config=RunConfig(workflow_name=workflow_name, group_id=session_id),
+        run_config=RunConfig(
+            model_provider=model_provider,
+            workflow_name=workflow_name,
+            group_id=session_id,
+        ),
     )
     return str(result.final_output or "")
 

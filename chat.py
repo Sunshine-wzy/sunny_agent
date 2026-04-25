@@ -4,10 +4,10 @@ import mimetypes
 import urllib.request
 from typing import Any
 
-from agents import Runner
+from agents import RunConfig, Runner
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageSegment, PrivateMessageEvent
 
-from .graph import run_group_chat, run_private_chat, translator_agent
+from .graph import model_provider, run_group_chat, run_private_chat, translator_agent
 
 
 IMAGE_TOKEN_HINT = "[user sent an image]"
@@ -115,10 +115,18 @@ async def private_chat(event: PrivateMessageEvent, bot: Bot, mem_enabled: bool) 
 
 
 async def atranslate(text: str) -> str:
-    result = await Runner.run(translator_agent, text)
+    result = await Runner.run(
+        translator_agent,
+        text,
+        run_config=RunConfig(model_provider=model_provider),
+    )
     return str(result.final_output or "")
 
 
 def translate(text: str) -> str:
-    result = Runner.run_sync(translator_agent, text)
+    result = Runner.run_sync(
+        translator_agent,
+        text,
+        run_config=RunConfig(model_provider=model_provider),
+    )
     return str(result.final_output or "")
