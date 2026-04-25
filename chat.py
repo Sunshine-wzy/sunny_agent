@@ -15,7 +15,6 @@ from langchain_core.runnables import RunnableConfig
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, PrivateMessageEvent, Bot, MessageSegment
 
 from .graph import group_graph, private_graph
-from .mem import get_memory, add_memory
 
 
 set_verbose(True)
@@ -138,39 +137,12 @@ async def group_chat(event: GroupMessageEvent, bot: Bot, mem_enabled: bool) -> s
     })
     
     message = await _build_human_message(event, bot, user_name)
-    input_data: dict[str, Any] = {"messages": [message], "memories": None}
-    
-    # if mem_enabled:
-    #     memory = await get_memory()
-    #     mem_user_id = f"u{event.sender.user_id}"
-    #     mem_group_id = f"g{event.group_id}"
-        
-    #     relevant_user_memories = await memory.search(query=msg, user_id=mem_user_id, limit=5)
-    #     relevant_group_memories = await memory.search(query=msg, user_id=mem_group_id, limit=5)
-    #     all_memories = relevant_user_memories["results"] + relevant_group_memories["results"]
-        
-    #     memories_str = "\n".join(f"- {entry['memory']}" for entry in all_memories)
-    #     input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
-    #     print(f"Group Chat Memories ({mem_user_id}): {memories_str}")
+    input_data: dict[str, Any] = {"messages": [message]}
     
     output = await group_graph.ainvoke(input_data, config) # type: ignore
     output_messages = output["messages"]
     dict_messages = convert_messages_to_dict(output_messages)
     print(f"Output messages: {dict_messages}")
-    
-    # if mem_enabled:
-    #     current_conversation = [
-    #         {
-    #             "role": "user",
-    #             "content": msg
-    #         },
-    #         {
-    #             "role": "assistant",
-    #             "content": dict_messages[-1]["content"]
-    #         }
-    #     ]
-    #     asyncio.create_task(add_memory(current_conversation, user_id=mem_user_id))
-    #     print(f"Current conversation: {current_conversation}")
     
     return parser.invoke(output_messages[-1])
 
@@ -186,34 +158,12 @@ async def private_chat(event: PrivateMessageEvent, bot: Bot, mem_enabled: bool) 
     })
     
     message = await _build_human_message(event, bot, event.sender.nickname or "Unknown")
-    input_data: dict[str, Any] = {"messages": [message], "memories": None}
-    
-    # if mem_enabled:
-    #     memory = await get_memory()
-    #     mem_user_id = f"u{event.user_id}"
-    #     relevant_memories = await memory.search(query=msg, user_id=mem_user_id, limit=5)
-    #     memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
-    #     input_data["memories"] = memories_str if memories_str.strip() else "暂无相关记忆信息"
-    #     print(f"Private Chat Memories ({mem_user_id}): {memories_str}")
+    input_data: dict[str, Any] = {"messages": [message]}
     
     output = await private_graph.ainvoke(input_data, config) # type: ignore
     output_messages = output["messages"]
     dict_messages = convert_messages_to_dict(output_messages)
     print(f"Output messages: {dict_messages}")
-    
-    # if mem_enabled:
-    #     current_conversation = [
-    #         {
-    #             "role": "user",
-    #             "content": msg
-    #         },
-    #         {
-    #             "role": "assistant",
-    #             "content": dict_messages[-1]["content"]
-    #         }
-    #     ]
-    #     asyncio.create_task(add_memory(current_conversation, user_id=mem_user_id))
-    #     print(f"Current conversation: {current_conversation}")
     
     return parser.invoke(output_messages[-1])
 

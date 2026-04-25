@@ -30,8 +30,6 @@ group_tools = common_tools + [
     tool.group_name,
     tool.group_member_list,
     tool.send_private_message,
-    tool.search_user_memories,
-    tool.list_user_memories,
 ]
 private_tools = common_tools
 
@@ -53,41 +51,11 @@ chat_prompt = ChatPromptTemplate.from_messages(
 group_chat_chain = chat_prompt | trimmer | model_with_group_tools
 private_chat_chain = chat_prompt | trimmer | model_with_private_tools
 
-chat_prompt_with_memory = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """user(name,qq)是与你聊天的用户的名字和QQ号,通常叫用户的名字即可,无需主动说出QQ号.
-
-# 用户记忆信息
-{memories}
-
-# 请根据以上记忆信息更好地理解用户并提供个性化的回应。"""
-        ),
-        MessagesPlaceholder(variable_name="messages")
-    ]
-)
-group_chat_chain_with_memory = chat_prompt_with_memory | trimmer | model_with_group_tools
-private_chat_chain_with_memory = chat_prompt_with_memory | trimmer | model_with_private_tools
-
-
 def group_chatbot(state: GroupState):
-    if "memories" in state and state["memories"]:
-        return {"messages": [group_chat_chain_with_memory.invoke({
-            "messages": state["messages"],
-            "memories": state["memories"]
-        })]}
-    else:
-        return {"messages": [group_chat_chain.invoke(state["messages"])]}
+    return {"messages": [group_chat_chain.invoke(state["messages"])]}
 
 def private_chatbot(state: PrivateState):
-    if "memories" in state and state["memories"]:
-        return {"messages": [private_chat_chain_with_memory.invoke({
-            "messages": state["messages"],
-            "memories": state["memories"]
-        })]}
-    else:
-        return {"messages": [private_chat_chain.invoke(state["messages"])]}
+    return {"messages": [private_chat_chain.invoke(state["messages"])]}
 
 
 group_graph_builder.add_node("chatbot", group_chatbot)

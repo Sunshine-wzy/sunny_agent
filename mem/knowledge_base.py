@@ -7,15 +7,11 @@ import nonebot_plugin_localstore as store
 import json
 import time
 
-from ..mem import get_memory, add_memory
-
-
 class KnowledgeItem(BaseModel):
     """知识库条目模型"""
     name: str = Field(...)
     text: str = Field(...)
     timestamp: int = Field(default_factory=lambda: int(time.time()))
-    memories: list[str] = Field(default_factory=list)
 
 
 class GroupKnowledgeBase(BaseModel):
@@ -95,34 +91,10 @@ async def add_knowledge_to_group(group_id: int, name: str, text: str) -> bool:
         if item.name == name:
             return False  # 名称重复
     
-    try:
-        memory = await get_memory()
-        added_memory = await memory.add(text, user_id=f"g{group_id}")
-        if added_memory and isinstance(added_memory, dict) and 'results' in added_memory:
-            results = added_memory['results']
-            if not results:
-                added_memory = await memory.add(text, user_id=f"g{group_id}", infer=False)
-                if added_memory and isinstance(added_memory, dict) and 'results' in added_memory:
-                    results = added_memory['results']
-            
-            memories = [memory_item['id'] for memory_item in results]
-            
-            # 添加新条目
-            new_item = KnowledgeItem(name=name, text=text, memories=memories)
-            kb.items.append(new_item)
-            
-            # 保存更改
-            _save_group_knowledge_bases()
-            return True
-    except Exception as e:
-        print(f"Error adding knowledge to group {group_id}: {e}")
-    return False
-
-
-async def remove_knowledge_memory(item: KnowledgeItem):
-    memory = await get_memory()
-    for memory_id in item.memories:
-        await memory.delete(memory_id)
+    new_item = KnowledgeItem(name=name, text=text)
+    kb.items.append(new_item)
+    _save_group_knowledge_bases()
+    return True
 
 async def remove_knowledge_from_group(
     group_id: int, 
@@ -154,8 +126,7 @@ async def remove_knowledge_from_group(
         if index is not None:
             # 按序号删除
             if 1 <= index <= len(kb.items):
-                item = kb.items.pop(index - 1)  # 转换为0开始的索引
-                await remove_knowledge_memory(item)
+                kb.items.pop(index - 1)  # 转换为0开始的索引
                 _save_group_knowledge_bases()
                 return True
             return False
@@ -164,8 +135,7 @@ async def remove_knowledge_from_group(
             # 按名称删除
             for i, item in enumerate(kb.items):
                 if item.name == name:
-                    item = kb.items.pop(i)
-                    await remove_knowledge_memory(item)
+                    kb.items.pop(i)
                     _save_group_knowledge_bases()
                     return True
             return False
