@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import random
 import re
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -123,10 +124,10 @@ def local_name(tag: str) -> str:
 
 
 def first_child_text(element: ET.Element, *names: str) -> str:
-    target_names = set(names)
-    for child in element:
-        if local_name(child.tag) in target_names and child.text:
-            return normalize_text(child.text)
+    for name in names:
+        for child in element:
+            if local_name(child.tag) == name and child.text:
+                return normalize_text(child.text)
     return ""
 
 
@@ -190,8 +191,8 @@ def parse_feed(xml_data: bytes) -> list[FeedItem]:
         guid = first_child_text(entry, "guid", "id")
         content_html = first_child_text(
             entry,
-            "encoded",
             "description",
+            "encoded",
             "summary",
             "content",
         )
@@ -315,31 +316,93 @@ def connected_onebot_bots() -> list[Bot]:
     return [bot for bot in get_bots().values() if isinstance(bot, Bot)]
 
 
+def should_retry_send_error(exc: Exception) -> bool:
+    return isinstance(exc, NetworkError)
+
+
+async def wait_random_seconds(min_seconds: float, max_seconds: float) -> None:
+    if max_seconds < min_seconds:
+        min_seconds, max_seconds = max_seconds, min_seconds
+    if max_seconds <= 0:
+        return
+
+    await asyncio.sleep(random.uniform(min_seconds, max_seconds))
+
+
+async def wait_between_messages() -> None:
+    await wait_random_seconds(
+        plugin_config.sunny_agent_ai_daily_message_delay_min_seconds,
+        plugin_config.sunny_agent_ai_daily_message_delay_max_seconds,
+    )
+
+
+async def wait_before_send_retry() -> None:
+    await wait_random_seconds(
+        plugin_config.sunny_agent_ai_daily_send_retry_delay_min_seconds,
+        plugin_config.sunny_agent_ai_daily_send_retry_delay_max_seconds,
+    )
+
+
 async def send_group_text(group_id: int, message: str) -> bool:
     last_error: Exception | None = None
     for bot in connected_onebot_bots():
-        try:
-            await bot.send_group_msg(group_id=group_id, message=message)
-        except (ActionFailed, ApiNotAvailable, NetworkError) as exc:  # noqa: PERF203
-            last_error = exc
-            logger.warning(f"Failed to send AI daily RSS to group {group_id}: {exc}")
-        else:
-            return True
+        for retry_index in range(plugin_config.sunny_agent_ai_daily_send_retry_times + 1):
+            try:
+                await bot.send_group_msg(group_id=group_id, message=message)
+            except ApiNotAvailable as exc:
+                last_error = exc
+                logger.warning(
+                    f"Failed to send AI daily RSS to group {group_id}: {exc}",
+                )
+                break
+            except (ActionFailed, NetworkError) as exc:  # noqa: PERF203
+                last_error = exc
+                if (
+                    retry_index < plugin_config.sunny_agent_ai_daily_send_retry_times
+                    and should_retry_send_error(exc)
+                ):
+                    logger.warning(
+                        "Failed to send AI daily RSS to group "
+                        f"{group_id}, retrying after a random delay: {exc}",
+                    )
+                    await wait_before_send_retry()
+                    continue
+
+                logger.warning(
+                    f"Failed to send AI daily RSS to group {group_id}: {exc}",
+                )
+                break
+            else:
+                return True
 
     if last_error is None:
         logger.warning("No OneBot v11 bots are connected for AI daily RSS push.")
     return False
 
 
-async def send_item_to_group(group_id: int, item: FeedItem) -> bool:
+async def send_item_to_group(
+    group_id: int,
+    item: FeedItem,
+    *,
+    wait_before_first: bool = False,
+) -> tuple[bool, bool]:
     message = format_item(item)
-    for chunk in split_message(
-        message,
-        plugin_config.sunny_agent_ai_daily_message_max_chars,
+    sent_any = False
+    for index, chunk in enumerate(
+        split_message(
+            message,
+            plugin_config.sunny_agent_ai_daily_message_max_chars,
+        )
     ):
+        if index > 0 or wait_before_first:
+            await wait_between_messages()
+            wait_before_first = False
+
         if not await send_group_text(group_id, chunk):
-            return False
-    return True
+            return False, sent_any
+        sent_any = True
+
+    return True, sent_any
 
 
 async def push_ai_daily_rss() -> None:
@@ -370,8 +433,16 @@ async def push_ai_daily_rss() -> None:
             if item.item_id not in sent_item_ids
         ]
 
+        sent_message_to_group = False
         for item in reversed(pending_items):
-            if await send_item_to_group(group_id, item):
+            sent_item, sent_any = await send_item_to_group(
+                group_id,
+                item,
+                wait_before_first=sent_message_to_group,
+            )
+            sent_message_to_group = sent_message_to_group or sent_any
+
+            if sent_item:
                 sent_item_ids.append(item.item_id)
                 del sent_item_ids[:-200]
                 state_changed = True
