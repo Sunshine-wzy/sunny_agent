@@ -42,6 +42,13 @@ class FeedItem:
     content: str
 
 
+@dataclass(slots=True)
+class AiDailyRssState:
+    sent_item_ids: dict[str, list[str]]
+    enabled_group_ids: set[int]
+    disabled_group_ids: set[int]
+
+
 class HtmlToTextParser(HTMLParser):
     block_tags: ClassVar[set[str]] = {
         "address",
@@ -230,37 +237,118 @@ async def fetch_ai_daily_items() -> list[FeedItem]:
     return parse_feed(xml_data)
 
 
-def load_state() -> dict[str, list[str]]:
+def parse_group_id_set(value: object) -> set[int]:
+    if not isinstance(value, list):
+        return set()
+
+    group_ids: set[int] = set()
+    for item in value:
+        try:
+            group_ids.add(int(item))
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid AI daily RSS group id in state: {item}")
+
+    return group_ids
+
+
+def load_state() -> AiDailyRssState:
     if not STATE_FILE.exists():
-        return {}
+        return AiDailyRssState(
+            sent_item_ids={},
+            enabled_group_ids=set(),
+            disabled_group_ids=set(),
+        )
 
     try:
         with STATE_FILE.open("r", encoding="utf-8") as file:
             raw_state = json.load(file)
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning(f"Failed to read AI daily RSS state: {exc}")
-        return {}
+        return AiDailyRssState(
+            sent_item_ids={},
+            enabled_group_ids=set(),
+            disabled_group_ids=set(),
+        )
+
+    if not isinstance(raw_state, dict):
+        return AiDailyRssState(
+            sent_item_ids={},
+            enabled_group_ids=set(),
+            disabled_group_ids=set(),
+        )
 
     sent_items = raw_state.get("sent_item_ids", {})
-    if not isinstance(sent_items, dict):
-        return {}
+    sent_item_ids: dict[str, list[str]] = {}
+    if isinstance(sent_items, dict):
+        for group_id, item_ids in sent_items.items():
+            if isinstance(item_ids, list):
+                sent_item_ids[str(group_id)] = [str(item_id) for item_id in item_ids]
 
-    state: dict[str, list[str]] = {}
-    for group_id, item_ids in sent_items.items():
-        if isinstance(item_ids, list):
-            state[str(group_id)] = [str(item_id) for item_id in item_ids]
-    return state
+    return AiDailyRssState(
+        sent_item_ids=sent_item_ids,
+        enabled_group_ids=parse_group_id_set(raw_state.get("enabled_group_ids")),
+        disabled_group_ids=parse_group_id_set(raw_state.get("disabled_group_ids")),
+    )
 
 
-def save_state(state: dict[str, list[str]]) -> None:
-    payload = {"sent_item_ids": state}
+def save_state(state: AiDailyRssState) -> None:
+    payload = {
+        "sent_item_ids": state.sent_item_ids,
+        "enabled_group_ids": sorted(state.enabled_group_ids),
+        "disabled_group_ids": sorted(state.disabled_group_ids),
+    }
     write_json(STATE_FILE, payload)
 
 
-def write_json(path: Path, payload: dict[str, dict[str, list[str]]]) -> None:
+def write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
+
+
+def configured_group_ids() -> set[int]:
+    if not plugin_config.sunny_agent_ai_daily_enabled:
+        return set()
+
+    return set(plugin_config.sunny_agent_ai_daily_group_ids)
+
+
+def target_group_ids(state: AiDailyRssState | None = None) -> list[int]:
+    current_state = state or load_state()
+    group_ids = configured_group_ids() | current_state.enabled_group_ids
+    group_ids -= current_state.disabled_group_ids
+    return sorted(group_ids)
+
+
+def is_group_ai_daily_enabled(group_id: int) -> bool:
+    return int(group_id) in target_group_ids()
+
+
+def set_group_ai_daily_enabled(group_id: int, enabled: bool) -> None:
+    state = load_state()
+    normalized_group_id = int(group_id)
+    if enabled:
+        state.enabled_group_ids.add(normalized_group_id)
+        state.disabled_group_ids.discard(normalized_group_id)
+    else:
+        state.enabled_group_ids.discard(normalized_group_id)
+        state.disabled_group_ids.add(normalized_group_id)
+
+    save_state(state)
+
+
+def mark_item_sent(
+    state: AiDailyRssState,
+    group_id: int,
+    item_id: str,
+) -> bool:
+    sent_item_ids = state.sent_item_ids.setdefault(str(group_id), [])
+    if item_id in sent_item_ids:
+        return False
+
+    sent_item_ids.append(item_id)
+    del sent_item_ids[:-200]
+    return True
 
 
 def format_item(item: FeedItem) -> str:
@@ -312,8 +400,12 @@ def split_message(message: str, max_chars: int) -> list[str]:
     return [f"{chunk}\n\n({index}/{total})" for index, chunk in enumerate(chunks, 1)]
 
 
-def connected_onebot_bots() -> list[Bot]:
-    return [bot for bot in get_bots().values() if isinstance(bot, Bot)]
+def connected_onebot_bots(preferred_bot: Bot | None = None) -> list[Bot]:
+    bots = [bot for bot in get_bots().values() if isinstance(bot, Bot)]
+    if preferred_bot is None:
+        return bots
+
+    return [preferred_bot, *(bot for bot in bots if bot is not preferred_bot)]
 
 
 def should_retry_send_error(exc: Exception) -> bool:
@@ -343,9 +435,14 @@ async def wait_before_send_retry() -> None:
     )
 
 
-async def send_group_text(group_id: int, message: str) -> bool:
+async def send_group_text(
+    group_id: int,
+    message: str,
+    *,
+    preferred_bot: Bot | None = None,
+) -> bool:
     last_error: Exception | None = None
-    for bot in connected_onebot_bots():
+    for bot in connected_onebot_bots(preferred_bot):
         for retry_index in range(plugin_config.sunny_agent_ai_daily_send_retry_times + 1):
             try:
                 await bot.send_group_msg(group_id=group_id, message=message)
@@ -384,6 +481,7 @@ async def send_item_to_group(
     group_id: int,
     item: FeedItem,
     *,
+    preferred_bot: Bot | None = None,
     wait_before_first: bool = False,
 ) -> tuple[bool, bool]:
     message = format_item(item)
@@ -398,17 +496,54 @@ async def send_item_to_group(
             await wait_between_messages()
             wait_before_first = False
 
-        if not await send_group_text(group_id, chunk):
+        if not await send_group_text(group_id, chunk, preferred_bot=preferred_bot):
             return False, sent_any
         sent_any = True
 
     return True, sent_any
 
 
+async def send_items_to_group(
+    group_id: int,
+    items: list[FeedItem],
+    state: AiDailyRssState,
+    *,
+    preferred_bot: Bot | None = None,
+    only_unsent: bool = True,
+) -> tuple[int, bool]:
+    group_key = str(group_id)
+    sent_item_ids = state.sent_item_ids.setdefault(group_key, [])
+    selected_items = items[: plugin_config.sunny_agent_ai_daily_max_items]
+    if only_unsent:
+        selected_items = [
+            item for item in selected_items if item.item_id not in sent_item_ids
+        ]
+
+    sent_count = 0
+    state_changed = False
+    sent_message_to_group = False
+    for item in reversed(selected_items):
+        sent_item, sent_any = await send_item_to_group(
+            group_id,
+            item,
+            preferred_bot=preferred_bot,
+            wait_before_first=sent_message_to_group,
+        )
+        sent_message_to_group = sent_message_to_group or sent_any
+
+        if not sent_item:
+            break
+
+        sent_count += 1
+        state_changed = mark_item_sent(state, group_id, item.item_id) or state_changed
+
+    return sent_count, state_changed
+
+
 async def push_ai_daily_rss() -> None:
-    group_ids = plugin_config.sunny_agent_ai_daily_group_ids
+    state = load_state()
+    group_ids = target_group_ids(state)
     if not group_ids:
-        logger.warning("AI daily RSS push is enabled, but no target group IDs are set.")
         return
 
     try:
@@ -421,43 +556,22 @@ async def push_ai_daily_rss() -> None:
         logger.warning("AI daily RSS feed returned no items.")
         return
 
-    state = load_state()
     state_changed = False
 
     for group_id in group_ids:
-        group_key = str(group_id)
-        sent_item_ids = state.setdefault(group_key, [])
-        pending_items = [
-            item
-            for item in items[: plugin_config.sunny_agent_ai_daily_max_items]
-            if item.item_id not in sent_item_ids
-        ]
-
-        sent_message_to_group = False
-        for item in reversed(pending_items):
-            sent_item, sent_any = await send_item_to_group(
-                group_id,
-                item,
-                wait_before_first=sent_message_to_group,
-            )
-            sent_message_to_group = sent_message_to_group or sent_any
-
-            if sent_item:
-                sent_item_ids.append(item.item_id)
-                del sent_item_ids[:-200]
-                state_changed = True
+        _, group_state_changed = await send_items_to_group(group_id, items, state)
+        state_changed = state_changed or group_state_changed
 
     if state_changed:
         save_state(state)
 
 
-if plugin_config.sunny_agent_ai_daily_enabled:
-    scheduler.add_job(
-        push_ai_daily_rss,
-        "cron",
-        hour=plugin_config.sunny_agent_ai_daily_hour,
-        minute=plugin_config.sunny_agent_ai_daily_minute,
-        timezone=plugin_config.sunny_agent_ai_daily_timezone,
-        id=JOB_ID,
-        replace_existing=True,
-    )
+scheduler.add_job(
+    push_ai_daily_rss,
+    "cron",
+    hour=plugin_config.sunny_agent_ai_daily_hour,
+    minute=plugin_config.sunny_agent_ai_daily_minute,
+    timezone=plugin_config.sunny_agent_ai_daily_timezone,
+    id=JOB_ID,
+    replace_existing=True,
+)
