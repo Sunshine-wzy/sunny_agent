@@ -77,7 +77,7 @@ async def handle_rss_today(event: GroupMessageEvent, bot: Bot) -> None:
         save_state(state)
 
     if sent_count:
-        await rss.finish("今日 AI 早报已发送")
+        # await rss.finish("今日 AI 早报已发送")
         return
 
     await rss.finish("AI 早报发送失败，请稍后再试")

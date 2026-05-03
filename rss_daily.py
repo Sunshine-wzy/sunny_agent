@@ -345,7 +345,7 @@ def mark_item_sent(
 
 
 def format_item(item: FeedItem) -> str:
-    lines = ["【每日 AI 早报】", item.title]
+    lines = [f"【AI 早报 {item.title}】"]
 
     published = display_datetime(item.published)
     if published:
