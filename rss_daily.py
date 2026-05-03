@@ -95,17 +95,26 @@ class HtmlToTextParser(HTMLParser):
         _attrs: list[tuple[str, str | None]],
     ) -> None:
         if tag in self.heading_tags:
-            self._append(f"\n{self.heading_tags[tag]} ")
+            self._append(f"\n\n{self.heading_tags[tag]} ")
         elif tag == "li":
-            self._append("\n- ")
+            if self.parts and self.parts[-1].endswith("\n"):
+                self._append("- ")
+            else:
+                self._append("\n- ")
         elif tag in self.block_tags:
             self._append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in self.block_tags and tag != "li":
+        if tag in {"h1", "h2"}:
+            self._append("\n\n")
+        elif tag in self.heading_tags:
+            return
+        elif tag in self.block_tags and tag != "li":
             self._append("\n")
 
     def handle_data(self, data: str) -> None:
+        if data.isspace() and "\n" in data:
+            return
         self._append(data)
 
     def text(self) -> str:
