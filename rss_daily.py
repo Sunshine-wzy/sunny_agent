@@ -88,16 +88,20 @@ class HtmlToTextParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.ignored_h1_depth = 0
+        self.link_stack: list[tuple[str | None, list[str]]] = []
 
     def handle_starttag(
         self,
         tag: str,
-        _attrs: list[tuple[str, str | None]],
+        attrs: list[tuple[str, str | None]],
     ) -> None:
         if tag == "h1":
             self.ignored_h1_depth += 1
             return
         if self.ignored_h1_depth:
+            return
+        if tag == "a":
+            self.link_stack.append((self._href_from_attrs(attrs), []))
             return
         if tag in self.heading_tags:
             self._append(f"\n\n{self.heading_tags[tag]} ")
@@ -115,6 +119,15 @@ class HtmlToTextParser(HTMLParser):
             return
         if self.ignored_h1_depth:
             return
+        if tag == "a":
+            if self.link_stack:
+                href, link_parts = self.link_stack.pop()
+                link_text = "".join(link_parts)
+                if href:
+                    self._append_markdown_link(link_text, href)
+                else:
+                    self._append(link_text)
+            return
         if tag == "h2":
             self._append("\n\n")
         elif tag in self.heading_tags:
@@ -130,11 +143,35 @@ class HtmlToTextParser(HTMLParser):
         self._append(data)
 
     def text(self) -> str:
+        while self.link_stack:
+            href, link_parts = self.link_stack.pop()
+            link_text = "".join(link_parts)
+            if href:
+                self._append_markdown_link(link_text, href)
+            else:
+                self._append(link_text)
         return normalize_text("".join(self.parts))
 
     def _append(self, text: str) -> None:
         if text:
-            self.parts.append(text)
+            if self.link_stack:
+                self.link_stack[-1][1].append(text)
+            else:
+                self.parts.append(text)
+
+    def _append_markdown_link(self, text: str, href: str) -> None:
+        label = normalize_text(text) or href
+        if label == href:
+            self._append(href)
+            return
+        self._append(f"[{label}]( {href} )")
+
+    @staticmethod
+    def _href_from_attrs(attrs: list[tuple[str, str | None]]) -> str | None:
+        for name, value in attrs:
+            if name.lower() == "href" and value:
+                return value.strip() or None
+        return None
 
 
 def normalize_text(text: str) -> str:
