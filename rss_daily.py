@@ -51,12 +51,11 @@ class AiDailyRssState:
 
 class HtmlToTextParser(HTMLParser):
     heading_tags: ClassVar[dict[str, str]] = {
-        "h1": "#",
-        "h2": "##",
-        "h3": "###",
-        "h4": "####",
-        "h5": "#####",
-        "h6": "######",
+        "h2": "#",
+        "h3": "##",
+        "h4": "###",
+        "h5": "####",
+        "h6": "#####",
     }
     block_tags: ClassVar[set[str]] = {
         "address",
@@ -88,12 +87,18 @@ class HtmlToTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self.ignored_h1_depth = 0
 
     def handle_starttag(
         self,
         tag: str,
         _attrs: list[tuple[str, str | None]],
     ) -> None:
+        if tag == "h1":
+            self.ignored_h1_depth += 1
+            return
+        if self.ignored_h1_depth:
+            return
         if tag in self.heading_tags:
             self._append(f"\n\n{self.heading_tags[tag]} ")
         elif tag == "li":
@@ -105,7 +110,12 @@ class HtmlToTextParser(HTMLParser):
             self._append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"h1", "h2"}:
+        if tag == "h1":
+            self.ignored_h1_depth = max(0, self.ignored_h1_depth - 1)
+            return
+        if self.ignored_h1_depth:
+            return
+        if tag == "h2":
             self._append("\n\n")
         elif tag in self.heading_tags:
             return
@@ -113,6 +123,8 @@ class HtmlToTextParser(HTMLParser):
             self._append("\n")
 
     def handle_data(self, data: str) -> None:
+        if self.ignored_h1_depth:
+            return
         if data.isspace() and "\n" in data:
             return
         self._append(data)
