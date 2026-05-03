@@ -412,20 +412,64 @@ def mark_item_sent(
     return True
 
 
-def format_item(item: FeedItem) -> str:
+def split_content_at_second_h2(content: str) -> tuple[str, str]:
+    h2_matches = list(re.finditer(r"(?i)<h2\b", content))
+    if len(h2_matches) < 2:
+        h2_matches = list(re.finditer(r"(?m)^# ", content))
+
+    if len(h2_matches) < 2:
+        return content, ""
+
+    split_index = h2_matches[1].start()
+    return content[:split_index].strip(), content[split_index:].strip()
+
+
+def format_item_header(item: FeedItem) -> list[str]:
     lines = [f"【AI 早报 {item.title}】"]
 
     published = display_datetime(item.published)
     if published:
         lines.append(f"发布时间：{published}")
 
-    if item.content:
-        lines.extend(["", item.content])
+    return lines
+
+
+def format_item(item: FeedItem) -> str:
+    lines = format_item_header(item)
+    leading_content, remaining_content = split_content_at_second_h2(item.content)
+
+    if leading_content:
+        lines.extend(["", leading_content])
 
     if item.link:
         lines.extend(["", f"来源：{item.link}"])
 
+    if remaining_content:
+        lines.extend(["", remaining_content])
+
     return "\n".join(lines).strip()
+
+
+def format_item_messages(item: FeedItem) -> list[str]:
+    leading_content, remaining_content = split_content_at_second_h2(item.content)
+    if not remaining_content:
+        return [format_item(item)]
+
+    leading_lines = format_item_header(item)
+    if leading_content:
+        leading_lines.extend(["", leading_content])
+
+    if item.link:
+        leading_lines.extend(["", f"来源：{item.link}"])
+
+    return [
+        message
+        for message in (
+            "\n".join(leading_lines).strip(),
+            remaining_content,
+        )
+        if message
+    ]
 
 
 def split_message(message: str, max_chars: int) -> list[str]:
@@ -545,21 +589,21 @@ async def send_item_to_group(
     preferred_bot: Bot | None = None,
     wait_before_first: bool = False,
 ) -> tuple[bool, bool]:
-    message = format_item(item)
     sent_any = False
-    for index, chunk in enumerate(
-        split_message(
-            message,
-            plugin_config.sunny_agent_ai_daily_message_max_chars,
-        )
-    ):
-        if index > 0 or wait_before_first:
-            await wait_between_messages()
-            wait_before_first = False
+    for message in format_item_messages(item):
+        for index, chunk in enumerate(
+            split_message(
+                message,
+                plugin_config.sunny_agent_ai_daily_message_max_chars,
+            )
+        ):
+            if index > 0 or wait_before_first or sent_any:
+                await wait_between_messages()
+                wait_before_first = False
 
-        if not await send_group_text(group_id, chunk, preferred_bot=preferred_bot):
-            return False, sent_any
-        sent_any = True
+            if not await send_group_text(group_id, chunk, preferred_bot=preferred_bot):
+                return False, sent_any
+            sent_any = True
 
     return True, sent_any
 
