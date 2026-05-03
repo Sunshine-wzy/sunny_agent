@@ -15,7 +15,7 @@ from typing import ClassVar
 
 import nonebot_plugin_localstore as store
 from nonebot import get_bots, get_plugin_config
-from nonebot.adapters.onebot.v11 import Bot
+from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.adapters.onebot.v11.exception import (
     ActionFailed,
     ApiNotAvailable,
@@ -412,16 +412,35 @@ def mark_item_sent(
     return True
 
 
-def split_content_at_second_h2(content: str) -> tuple[str, str]:
+def h2_start_indexes(content: str) -> list[int]:
     h2_matches = list(re.finditer(r"(?i)<h2\b", content))
-    if len(h2_matches) < 2:
-        h2_matches = list(re.finditer(r"(?m)^# ", content))
+    if h2_matches:
+        return [match.start() for match in h2_matches]
 
-    if len(h2_matches) < 2:
+    return [match.start() for match in re.finditer(r"(?m)^# ", content)]
+
+
+def split_content_at_second_h2(content: str) -> tuple[str, str]:
+    h2_indexes = h2_start_indexes(content)
+    if len(h2_indexes) < 2:
         return content, ""
 
-    split_index = h2_matches[1].start()
+    split_index = h2_indexes[1]
     return content[:split_index].strip(), content[split_index:].strip()
+
+
+def split_content_by_h2(content: str) -> list[str]:
+    h2_indexes = h2_start_indexes(content)
+    if not h2_indexes:
+        stripped_content = content.strip()
+        return [stripped_content] if stripped_content else []
+
+    h2_indexes.append(len(content))
+    return [
+        content[start:end].strip()
+        for start, end in zip(h2_indexes, h2_indexes[1:])
+        if content[start:end].strip()
+    ]
 
 
 def format_item_header(item: FeedItem) -> list[str]:
@@ -450,10 +469,10 @@ def format_item(item: FeedItem) -> str:
     return "\n".join(lines).strip()
 
 
-def format_item_messages(item: FeedItem) -> list[str]:
+def format_item_direct_message(item: FeedItem) -> str:
     leading_content, remaining_content = split_content_at_second_h2(item.content)
     if not remaining_content:
-        return [format_item(item)]
+        return format_item(item)
 
     leading_lines = format_item_header(item)
     if leading_content:
@@ -462,14 +481,12 @@ def format_item_messages(item: FeedItem) -> list[str]:
     if item.link:
         leading_lines.extend(["", f"来源：{item.link}"])
 
-    return [
-        message
-        for message in (
-            "\n".join(leading_lines).strip(),
-            remaining_content,
-        )
-        if message
-    ]
+    return "\n".join(leading_lines).strip()
+
+
+def format_item_forward_messages(item: FeedItem) -> list[str]:
+    _, remaining_content = split_content_at_second_h2(item.content)
+    return split_content_by_h2(remaining_content)
 
 
 def split_message(message: str, max_chars: int) -> list[str]:
@@ -582,6 +599,69 @@ async def send_group_text(
     return False
 
 
+def make_forward_nodes(bot: Bot, messages: list[str]) -> Message:
+    return Message(
+        [
+            MessageSegment.node_custom(
+                user_id=int(bot.self_id),
+                nickname="AI 早报",
+                content=Message(message),
+            )
+            for message in messages
+        ],
+    )
+
+
+async def send_group_forward_messages(
+    group_id: int,
+    messages: list[str],
+    *,
+    preferred_bot: Bot | None = None,
+) -> bool:
+    if not messages:
+        return True
+
+    last_error: Exception | None = None
+    for bot in connected_onebot_bots(preferred_bot):
+        forward_nodes = make_forward_nodes(bot, messages)
+        for retry_index in range(plugin_config.sunny_agent_ai_daily_send_retry_times + 1):
+            try:
+                await bot.call_api(
+                    "send_group_forward_msg",
+                    group_id=group_id,
+                    messages=forward_nodes,
+                )
+            except ApiNotAvailable as exc:
+                last_error = exc
+                logger.warning(
+                    f"Failed to send AI daily RSS forward to group {group_id}: {exc}",
+                )
+                break
+            except (ActionFailed, NetworkError) as exc:  # noqa: PERF203
+                last_error = exc
+                if (
+                    retry_index < plugin_config.sunny_agent_ai_daily_send_retry_times
+                    and should_retry_send_error(exc)
+                ):
+                    logger.warning(
+                        "Failed to send AI daily RSS forward to group "
+                        f"{group_id}, retrying after a random delay: {exc}",
+                    )
+                    await wait_before_send_retry()
+                    continue
+
+                logger.warning(
+                    f"Failed to send AI daily RSS forward to group {group_id}: {exc}",
+                )
+                break
+            else:
+                return True
+
+    if last_error is None:
+        logger.warning("No OneBot v11 bots are connected for AI daily RSS push.")
+    return False
+
+
 async def send_item_to_group(
     group_id: int,
     item: FeedItem,
@@ -590,20 +670,34 @@ async def send_item_to_group(
     wait_before_first: bool = False,
 ) -> tuple[bool, bool]:
     sent_any = False
-    for message in format_item_messages(item):
-        for index, chunk in enumerate(
-            split_message(
-                message,
-                plugin_config.sunny_agent_ai_daily_message_max_chars,
-            )
-        ):
-            if index > 0 or wait_before_first or sent_any:
-                await wait_between_messages()
-                wait_before_first = False
+    direct_message = format_item_direct_message(item)
+    for index, chunk in enumerate(
+        split_message(
+            direct_message,
+            plugin_config.sunny_agent_ai_daily_message_max_chars,
+        )
+    ):
+        if index > 0 or wait_before_first:
+            await wait_between_messages()
+            wait_before_first = False
 
-            if not await send_group_text(group_id, chunk, preferred_bot=preferred_bot):
-                return False, sent_any
-            sent_any = True
+        if not await send_group_text(group_id, chunk, preferred_bot=preferred_bot):
+            return False, sent_any
+        sent_any = True
+
+    forward_messages = format_item_forward_messages(item)
+    if forward_messages:
+        if sent_any or wait_before_first:
+            await wait_between_messages()
+            wait_before_first = False
+
+        if not await send_group_forward_messages(
+            group_id,
+            forward_messages,
+            preferred_bot=preferred_bot,
+        ):
+            return False, sent_any
+        sent_any = True
 
     return True, sent_any
 
