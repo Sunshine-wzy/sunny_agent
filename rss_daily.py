@@ -50,6 +50,14 @@ class AiDailyRssState:
 
 
 class HtmlToTextParser(HTMLParser):
+    heading_tags: ClassVar[dict[str, str]] = {
+        "h1": "#",
+        "h2": "##",
+        "h3": "###",
+        "h4": "####",
+        "h5": "#####",
+        "h6": "######",
+    }
     block_tags: ClassVar[set[str]] = {
         "address",
         "article",
@@ -86,13 +94,15 @@ class HtmlToTextParser(HTMLParser):
         tag: str,
         _attrs: list[tuple[str, str | None]],
     ) -> None:
-        if tag == "li":
+        if tag in self.heading_tags:
+            self._append(f"\n{self.heading_tags[tag]} ")
+        elif tag == "li":
             self._append("\n- ")
         elif tag in self.block_tags:
             self._append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in self.block_tags:
+        if tag in self.block_tags and tag != "li":
             self._append("\n")
 
     def handle_data(self, data: str) -> None:
@@ -198,8 +208,8 @@ def parse_feed(xml_data: bytes) -> list[FeedItem]:
         guid = first_child_text(entry, "guid", "id")
         content_html = first_child_text(
             entry,
-            "description",
             "encoded",
+            "description",
             "summary",
             "content",
         )
