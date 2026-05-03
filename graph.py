@@ -4,7 +4,6 @@ from typing import Any
 
 from agents import (
     Agent,
-    CodeInterpreterTool,
     ImageGenerationTool,
     ModelSettings,
     OpenAIProvider,
@@ -15,25 +14,30 @@ from agents import (
     set_tracing_disabled,
 )
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
+from openai.types.shared import Reasoning
 
 from . import tool
 
 
-MODEL_NAME = os.getenv("SUNNY_AGENT_MODEL", "gpt-5.4")
+MODEL_NAME = os.getenv("SUNNY_AGENT_MODEL", "gpt-5.5")
 MODEL_BASE_URL = os.getenv("SUNNY_AGENT_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
 MODEL_API_KEY = os.getenv("SUNNY_AGENT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 MAX_TURNS = int(os.getenv("SUNNY_AGENT_MAX_TURNS", "8"))
 
 set_tracing_disabled(disabled=os.getenv("SUNNY_AGENT_ENABLE_TRACING", "").lower() not in {"1", "true", "yes"})
 
-model_provider = OpenAIProvider(api_key=MODEL_API_KEY, base_url=MODEL_BASE_URL, use_responses=True)
+model_provider = OpenAIProvider(
+    api_key=MODEL_API_KEY,
+    base_url=MODEL_BASE_URL,
+    use_responses=True,
+)
 
 chat_instructions = (
     "你是 Sunny，输入里的 user(name,qq) 表示正在和你聊天的用户姓名和 QQ 号。"
     "通常称呼用户姓名即可，不需要主动说出 QQ 号。"
 )
 
-model_settings = ModelSettings()
+model_settings = ModelSettings(reasoning=Reasoning(effort="xhigh"))
 hosted_tools = [
     WebSearchTool(),
     ImageGenerationTool(tool_config={"type": "image_generation"}),
