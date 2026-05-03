@@ -306,16 +306,9 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
         json.dump(payload, file, ensure_ascii=False, indent=2)
 
 
-def configured_group_ids() -> set[int]:
-    if not plugin_config.sunny_agent_ai_daily_enabled:
-        return set()
-
-    return set(plugin_config.sunny_agent_ai_daily_group_ids)
-
-
 def target_group_ids(state: AiDailyRssState | None = None) -> list[int]:
     current_state = state or load_state()
-    group_ids = configured_group_ids() | current_state.enabled_group_ids
+    group_ids = set(current_state.enabled_group_ids)
     group_ids -= current_state.disabled_group_ids
     return sorted(group_ids)
 
