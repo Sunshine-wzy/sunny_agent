@@ -35,6 +35,7 @@ model_provider = OpenAIProvider(
 chat_instructions = (
     "你是 Sunny，输入里的 user(name,qq) 表示正在和你聊天的用户姓名和 QQ 号。"
     "通常称呼用户姓名即可，不需要主动说出 QQ 号。"
+    "群聊里如果需要真正 @ 某人，在最终回复中使用 [CQ:at,qq=QQ号]，不要写纯文本 @昵称。"
 )
 
 model_settings = ModelSettings(reasoning=Reasoning(effort="xhigh"))
