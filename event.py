@@ -1,14 +1,26 @@
 import re
 
 from nonebot import on_message
-from nonebot.rule import to_me
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment, PrivateMessageEvent
+from nonebot.adapters.onebot.v11 import (
+    Bot,
+    GroupMessageEvent,
+    Message,
+    MessageSegment,
+    PrivateMessageEvent,
+)
 
-from . import chat
+from . import chat, tool
 from .graph import clear_group_history, clear_private_history
 
 
-llm = on_message(rule=to_me(), priority=10, block=False)
+async def _is_to_me_or_active_group(event) -> bool:
+    if isinstance(event, GroupMessageEvent) and tool.is_group_active_receiving_enabled(event.group_id):
+        return True
+
+    return event.is_tome()
+
+
+llm = on_message(rule=_is_to_me_or_active_group, priority=10, block=False)
 CLEAR_CONTEXT_COMMANDS = {"/clear"}
 AT_SEGMENT_PATTERN = re.compile(
     r"\[CQ:at,qq=(?P<cq>all|\d+)(?:,[^\]]*)?\]"
