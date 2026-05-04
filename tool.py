@@ -104,6 +104,87 @@ async def group_member_list(ctx: RunContextWrapper[ChatContext]) -> list[dict[st
     return members[:10]
 
 
+def _clean_member_name(value: Any) -> str:
+    return str(value or "").strip()
+
+
+@function_tool
+async def group_member_qq_by_nickname(
+    ctx: RunContextWrapper[ChatContext],
+    nickname: Annotated[
+        str,
+        "The QQ group member nickname or group card name to search for. Partial match is supported.",
+    ],
+) -> dict[str, Any]:
+    """Finds QQ numbers for current group members by nickname or group card name."""
+    event = ctx.context.event
+    if not isinstance(event, GroupMessageEvent):
+        return {
+            "query": nickname,
+            "matches": [],
+            "total": 0,
+            "truncated": False,
+            "message": "This chat is not a group chat.",
+        }
+
+    query = nickname.strip()
+    if not query:
+        return {
+            "query": nickname,
+            "matches": [],
+            "total": 0,
+            "truncated": False,
+            "message": "Nickname cannot be empty.",
+        }
+
+    query_folded = query.casefold()
+    members = await ctx.context.bot.get_group_member_list(group_id=event.group_id)
+    scored_matches: list[tuple[int, dict[str, Any]]] = []
+
+    for member in members:
+        card = _clean_member_name(member.get("card"))
+        member_nickname = _clean_member_name(member.get("nickname"))
+        display_name = card or member_nickname
+        names = [name for name in (card, member_nickname) if name]
+
+        if any(query_folded == name.casefold() for name in names):
+            score = 0
+        elif any(query_folded in name.casefold() for name in names):
+            score = 1
+        else:
+            continue
+
+        scored_matches.append(
+            (
+                score,
+                {
+                    "user_id": member.get("user_id"),
+                    "nickname": member_nickname,
+                    "card": card,
+                    "display_name": display_name,
+                },
+            )
+        )
+
+    scored_matches.sort(
+        key=lambda item: (
+            item[0],
+            len(item[1]["display_name"] or item[1]["nickname"]),
+            item[1]["user_id"] or 0,
+        )
+    )
+    matches = [match for _, match in scored_matches]
+    limit = 20
+    result = {
+        "query": query,
+        "matches": matches[:limit],
+        "total": len(matches),
+        "truncated": len(matches) > limit,
+    }
+    print(result)
+    return result
+
+
 @function_tool
 async def send_private_message(
     ctx: RunContextWrapper[ChatContext],

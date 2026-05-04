@@ -53,6 +53,7 @@ group_agent = Agent[tool.ChatContext](
         *hosted_tools,
         tool.group_name,
         tool.group_member_list,
+        tool.group_member_qq_by_nickname,
         tool.send_private_message,
         tool.enable_active_group_message_receiving,
         tool.disable_active_group_message_receiving,
