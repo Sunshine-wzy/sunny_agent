@@ -29,6 +29,7 @@ from .config import Config
 JOB_ID = "sunny_agent_ai_daily_rss"
 STATE_FILE = store.get_data_file("sunny_agent", "ai_daily_rss_state.json")
 USER_AGENT = "sunny-agent/1.0"
+FORWARD_MESSAGE_BATCH_SIZE = 10
 
 plugin_config = get_plugin_config(Config)
 
@@ -555,6 +556,13 @@ def split_messages(messages: list[str], max_chars: int) -> list[str]:
     return chunks
 
 
+def batch_messages(messages: list[str], batch_size: int) -> list[list[str]]:
+    return [
+        messages[index : index + batch_size]
+        for index in range(0, len(messages), batch_size)
+    ]
+
+
 def connected_onebot_bots(preferred_bot: Bot | None = None) -> list[Bot]:
     bots = [bot for bot in get_bots().values() if isinstance(bot, Bot)]
     if preferred_bot is None:
@@ -645,23 +653,18 @@ def make_forward_nodes(bot: Bot, messages: list[str]) -> Message:
     )
 
 
-async def send_group_forward_messages(
+async def send_group_forward_message_batch(
     group_id: int,
     messages: list[str],
     *,
     preferred_bot: Bot | None = None,
 ) -> bool:
-    forward_messages = split_messages(
-        messages,
-        plugin_config.sunny_agent_ai_daily_message_max_chars,
-    )
-
-    if not forward_messages:
+    if not messages:
         return True
 
     last_error: Exception | None = None
     for bot in connected_onebot_bots(preferred_bot):
-        forward_nodes = make_forward_nodes(bot, forward_messages)
+        forward_nodes = make_forward_nodes(bot, messages)
         for retry_index in range(plugin_config.sunny_agent_ai_daily_send_retry_times + 1):
             try:
                 await bot.call_api(
@@ -698,6 +701,35 @@ async def send_group_forward_messages(
     if last_error is None:
         logger.warning("No OneBot v11 bots are connected for AI daily RSS push.")
     return False
+
+
+async def send_group_forward_messages(
+    group_id: int,
+    messages: list[str],
+    *,
+    preferred_bot: Bot | None = None,
+) -> bool:
+    forward_messages = split_messages(
+        messages,
+        plugin_config.sunny_agent_ai_daily_message_max_chars,
+    )
+    forward_message_batches = batch_messages(
+        forward_messages,
+        FORWARD_MESSAGE_BATCH_SIZE,
+    )
+
+    for index, forward_message_batch in enumerate(forward_message_batches):
+        if index > 0:
+            await wait_between_messages()
+
+        if not await send_group_forward_message_batch(
+            group_id,
+            forward_message_batch,
+            preferred_bot=preferred_bot,
+        ):
+            return False
+
+    return True
 
 
 async def send_item_to_group(
