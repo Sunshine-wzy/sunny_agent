@@ -1,8 +1,11 @@
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import random
 import re
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -30,6 +33,18 @@ JOB_ID = "sunny_agent_ai_daily_rss"
 STATE_FILE = store.get_data_file("sunny_agent", "ai_daily_rss_state.json")
 USER_AGENT = "sunny-agent/1.0"
 FORWARD_MESSAGE_BATCH_SIZE = 10
+IMAGE_PLACEHOLDER_RE = re.compile(
+    r"\[\[sunny-rss-image:([A-Za-z0-9_-]+={0,2})\]\]",
+)
+IMAGE_LENGTH_PLACEHOLDER = "[图片]"
+IMAGE_SOURCE_ATTRS = (
+    "src",
+    "data-src",
+    "data-original",
+    "data-lazy-src",
+    "data-actualsrc",
+)
+IMAGE_SRCSET_ATTRS = ("srcset", "data-srcset")
 
 plugin_config = get_plugin_config(Config)
 
@@ -85,8 +100,9 @@ class HtmlToTextParser(HTMLParser):
         "ul",
     }
 
-    def __init__(self) -> None:
+    def __init__(self, base_url: str = "") -> None:
         super().__init__(convert_charrefs=True)
+        self.base_url = base_url
         self.parts: list[str] = []
         self.ignored_h1_depth = 0
         self.link_stack: list[tuple[str | None, list[str]]] = []
@@ -103,6 +119,9 @@ class HtmlToTextParser(HTMLParser):
             return
         if tag == "a":
             self.link_stack.append((self._href_from_attrs(attrs), []))
+            return
+        if tag == "img":
+            self._append_image(attrs)
             return
         if tag in self.heading_tags:
             self._append(f"\n\n{self.heading_tags[tag]} ")
@@ -162,16 +181,70 @@ class HtmlToTextParser(HTMLParser):
 
     def _append_markdown_link(self, text: str, href: str) -> None:
         label = normalize_text(text) or href
+        if IMAGE_PLACEHOLDER_RE.fullmatch(label):
+            self._append(label)
+            return
         if label == href:
             self._append(href)
             return
         self._append(f"[{label}]( {href} )")
+
+    def _append_image(self, attrs: list[tuple[str, str | None]]) -> None:
+        image_url = self._image_url_from_attrs(attrs)
+        if image_url:
+            self._append(f"\n{make_image_placeholder(image_url)}\n")
 
     @staticmethod
     def _href_from_attrs(attrs: list[tuple[str, str | None]]) -> str | None:
         for name, value in attrs:
             if name.lower() == "href" and value:
                 return value.strip() or None
+        return None
+
+    def _image_url_from_attrs(
+        self,
+        attrs: list[tuple[str, str | None]],
+    ) -> str | None:
+        attr_map = {
+            name.lower(): value.strip()
+            for name, value in attrs
+            if value and value.strip()
+        }
+
+        for attr_name in IMAGE_SOURCE_ATTRS:
+            image_url = self._normalize_image_url(attr_map.get(attr_name, ""))
+            if image_url:
+                return image_url
+
+        for attr_name in IMAGE_SRCSET_ATTRS:
+            image_url = self._normalize_image_url_from_srcset(
+                attr_map.get(attr_name, ""),
+            )
+            if image_url:
+                return image_url
+
+        return None
+
+    def _normalize_image_url_from_srcset(self, srcset: str) -> str | None:
+        for candidate in srcset.split(","):
+            image_url = self._normalize_image_url(candidate.strip().split(" ")[0])
+            if image_url:
+                return image_url
+        return None
+
+    def _normalize_image_url(self, image_url: str) -> str | None:
+        if not image_url:
+            return None
+
+        if image_url.startswith("//"):
+            base_scheme = urllib.parse.urlparse(self.base_url).scheme or "https"
+            image_url = f"{base_scheme}:{image_url}"
+
+        resolved_url = urllib.parse.urljoin(self.base_url, image_url)
+        parsed_url = urllib.parse.urlparse(resolved_url)
+        if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
+            return resolved_url
+
         return None
 
 
@@ -184,11 +257,47 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
-def html_to_text(text: str) -> str:
+def make_image_placeholder(image_url: str) -> str:
+    encoded_url = base64.urlsafe_b64encode(image_url.encode("utf-8")).decode("ascii")
+    return f"[[sunny-rss-image:{encoded_url}]]"
+
+
+def image_url_from_placeholder(encoded_url: str) -> str | None:
+    try:
+        return base64.urlsafe_b64decode(encoded_url.encode("ascii")).decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+
+
+def rss_text_to_message(text: str) -> Message:
+    message = Message()
+    last_end = 0
+
+    for match in IMAGE_PLACEHOLDER_RE.finditer(text):
+        leading_text = text[last_end : match.start()]
+        if leading_text:
+            message.append(MessageSegment.text(leading_text))
+
+        image_url = image_url_from_placeholder(match.group(1))
+        if image_url:
+            message.append(MessageSegment.image(image_url))
+        else:
+            message.append(MessageSegment.text(match.group(0)))
+
+        last_end = match.end()
+
+    trailing_text = text[last_end:]
+    if trailing_text:
+        message.append(MessageSegment.text(trailing_text))
+
+    return message
+
+
+def html_to_text(text: str, base_url: str = "") -> str:
     if not text:
         return ""
 
-    parser = HtmlToTextParser()
+    parser = HtmlToTextParser(base_url=base_url)
     parser.feed(text)
     parser.close()
     parsed_text = parser.text()
@@ -272,7 +381,7 @@ def parse_feed(xml_data: bytes) -> list[FeedItem]:
             "summary",
             "content",
         )
-        content = html_to_text(content_html)
+        content = html_to_text(content_html, base_url=link)
         item_id = make_item_id(guid, link, title, published)
 
         feed_items.append(
@@ -490,14 +599,25 @@ def format_item_forward_messages(item: FeedItem) -> list[str]:
     return split_content_by_h2(remaining_content)
 
 
+def message_text_length(message: str) -> int:
+    return len(IMAGE_PLACEHOLDER_RE.sub(IMAGE_LENGTH_PLACEHOLDER, message))
+
+
 def _split_message_body(message: str, max_chars: int) -> list[str]:
-    if len(message) <= max_chars:
+    if message_text_length(message) <= max_chars:
         return [message] if message.strip() else []
 
     chunks: list[str] = []
     current = ""
     for line in message.splitlines(keepends=True):
-        if len(line) > max_chars:
+        if message_text_length(line) > max_chars:
+            if IMAGE_PLACEHOLDER_RE.fullmatch(line.strip()):
+                if current.strip():
+                    chunks.append(current.strip())
+                    current = ""
+                chunks.append(line.strip())
+                continue
+
             if current.strip():
                 chunks.append(current.strip())
                 current = ""
@@ -507,7 +627,7 @@ def _split_message_body(message: str, max_chars: int) -> list[str]:
                     chunks.append(chunk)
             continue
 
-        if len(current) + len(line) > max_chars:
+        if message_text_length(current) + message_text_length(line) > max_chars:
             if current.strip():
                 chunks.append(current.strip())
             current = line
@@ -528,7 +648,11 @@ def _add_chunk_indexes(chunks: list[str], max_chars: int) -> list[str]:
 
         for index, chunk in enumerate(chunks, 1):
             suffix = f"\n\n({index}/{total})"
-            if len(chunk) + len(suffix) <= max_chars:
+            if IMAGE_PLACEHOLDER_RE.fullmatch(chunk.strip()):
+                numbered_chunks.append(f"{chunk}{suffix}")
+                continue
+
+            if message_text_length(chunk) + len(suffix) <= max_chars:
                 numbered_chunks.append(f"{chunk}{suffix}")
                 continue
 
@@ -608,7 +732,10 @@ async def send_group_text(
     for bot in connected_onebot_bots(preferred_bot):
         for retry_index in range(plugin_config.sunny_agent_ai_daily_send_retry_times + 1):
             try:
-                await bot.send_group_msg(group_id=group_id, message=message)
+                await bot.send_group_msg(
+                    group_id=group_id,
+                    message=rss_text_to_message(message),
+                )
             except ApiNotAvailable as exc:
                 last_error = exc
                 logger.warning(
@@ -646,7 +773,7 @@ def make_forward_nodes(bot: Bot, messages: list[str]) -> Message:
             MessageSegment.node_custom(
                 user_id=int(bot.self_id),
                 nickname="AI 早报",
-                content=Message(message),
+                content=rss_text_to_message(message),
             )
             for message in messages
         ],
