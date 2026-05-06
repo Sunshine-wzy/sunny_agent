@@ -489,25 +489,26 @@ def format_item_forward_messages(item: FeedItem) -> list[str]:
     return split_content_by_h2(remaining_content)
 
 
-def split_message(message: str, max_chars: int) -> list[str]:
+def _split_message_body(message: str, max_chars: int) -> list[str]:
     if len(message) <= max_chars:
-        return [message]
+        return [message] if message.strip() else []
 
     chunks: list[str] = []
     current = ""
     for line in message.splitlines(keepends=True):
         if len(line) > max_chars:
-            if current:
+            if current.strip():
                 chunks.append(current.strip())
                 current = ""
-            chunks.extend(
-                line[index : index + max_chars].strip()
-                for index in range(0, len(line), max_chars)
-            )
+            for index in range(0, len(line), max_chars):
+                chunk = line[index : index + max_chars].strip()
+                if chunk:
+                    chunks.append(chunk)
             continue
 
         if len(current) + len(line) > max_chars:
-            chunks.append(current.strip())
+            if current.strip():
+                chunks.append(current.strip())
             current = line
         else:
             current += line
@@ -515,11 +516,43 @@ def split_message(message: str, max_chars: int) -> list[str]:
     if current.strip():
         chunks.append(current.strip())
 
-    total = len(chunks)
-    if total <= 1:
+    return chunks
+
+
+def _add_chunk_indexes(chunks: list[str], max_chars: int) -> list[str]:
+    while True:
+        total = len(chunks)
+        numbered_chunks: list[str] = []
+        needs_resplit = False
+
+        for index, chunk in enumerate(chunks, 1):
+            suffix = f"\n\n({index}/{total})"
+            if len(chunk) + len(suffix) <= max_chars:
+                numbered_chunks.append(f"{chunk}{suffix}")
+                continue
+
+            needs_resplit = True
+            numbered_chunks.extend(_split_message_body(chunk, max_chars - len(suffix)))
+
+        if not needs_resplit:
+            return numbered_chunks
+
+        chunks = numbered_chunks
+
+
+def split_message(message: str, max_chars: int) -> list[str]:
+    chunks = _split_message_body(message, max_chars)
+    if len(chunks) <= 1:
         return chunks
 
-    return [f"{chunk}\n\n({index}/{total})" for index, chunk in enumerate(chunks, 1)]
+    return _add_chunk_indexes(chunks, max_chars)
+
+
+def split_messages(messages: list[str], max_chars: int) -> list[str]:
+    chunks: list[str] = []
+    for message in messages:
+        chunks.extend(split_message(message, max_chars))
+    return chunks
 
 
 def connected_onebot_bots(preferred_bot: Bot | None = None) -> list[Bot]:
@@ -618,12 +651,17 @@ async def send_group_forward_messages(
     *,
     preferred_bot: Bot | None = None,
 ) -> bool:
-    if not messages:
+    forward_messages = split_messages(
+        messages,
+        plugin_config.sunny_agent_ai_daily_message_max_chars,
+    )
+
+    if not forward_messages:
         return True
 
     last_error: Exception | None = None
     for bot in connected_onebot_bots(preferred_bot):
-        forward_nodes = make_forward_nodes(bot, messages)
+        forward_nodes = make_forward_nodes(bot, forward_messages)
         for retry_index in range(plugin_config.sunny_agent_ai_daily_send_retry_times + 1):
             try:
                 await bot.call_api(
