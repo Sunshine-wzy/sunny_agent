@@ -640,37 +640,40 @@ def _split_message_body(message: str, max_chars: int) -> list[str]:
     return chunks
 
 
-def _add_chunk_indexes(chunks: list[str], max_chars: int) -> list[str]:
-    while True:
-        total = len(chunks)
-        numbered_chunks: list[str] = []
-        needs_resplit = False
+def _message_index_suffix_length(total: int) -> int:
+    return len(f"\n\n({total}/{total})")
 
-        for index, chunk in enumerate(chunks, 1):
-            suffix = f"\n\n({index}/{total})"
-            if IMAGE_PLACEHOLDER_RE.fullmatch(chunk.strip()):
-                numbered_chunks.append(f"{chunk}{suffix}")
-                continue
 
-            if message_text_length(chunk) + len(suffix) <= max_chars:
-                numbered_chunks.append(f"{chunk}{suffix}")
-                continue
+def _split_indexed_message_body(message: str, max_chars: int) -> list[str]:
+    chunks = _split_message_body(message, max_chars)
+    while len(chunks) > 1:
+        body_max_chars = max(
+            1,
+            max_chars - _message_index_suffix_length(len(chunks)),
+        )
+        indexed_chunks = _split_message_body(message, body_max_chars)
+        if len(indexed_chunks) == len(chunks):
+            return indexed_chunks
 
-            needs_resplit = True
-            numbered_chunks.extend(_split_message_body(chunk, max_chars - len(suffix)))
+        chunks = indexed_chunks
 
-        if not needs_resplit:
-            return numbered_chunks
+    return chunks
 
-        chunks = numbered_chunks
+
+def _add_chunk_indexes(chunks: list[str]) -> list[str]:
+    total = len(chunks)
+    return [
+        f"{chunk}\n\n({index}/{total})"
+        for index, chunk in enumerate(chunks, 1)
+    ]
 
 
 def split_message(message: str, max_chars: int) -> list[str]:
-    chunks = _split_message_body(message, max_chars)
+    chunks = _split_indexed_message_body(message, max_chars)
     if len(chunks) <= 1:
         return chunks
 
-    return _add_chunk_indexes(chunks, max_chars)
+    return _add_chunk_indexes(chunks)
 
 
 def split_messages(messages: list[str], max_chars: int) -> list[str]:
