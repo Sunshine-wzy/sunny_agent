@@ -38,7 +38,7 @@ chat_instructions = (
     "群聊里如果需要真正 @ 某人，在最终回复中使用 [CQ:at,qq=QQ号]，不要写纯文本 @昵称。"
 )
 
-model_settings = ModelSettings(reasoning=Reasoning(effort="xhigh"))
+model_settings = ModelSettings(reasoning=Reasoning(effort="medium"))
 hosted_tools = [
     WebSearchTool(),
     ImageGenerationTool(tool_config={"type": "image_generation"}),
