@@ -249,24 +249,34 @@ def _post_sunny_flayer_instruction(
         return exc.code, body
 
 
-def _summarize_sunny_flayer_response(body: str) -> str:
+def _decode_sunny_flayer_response(status: int, body: str) -> dict[str, Any]:
     body = body.strip()
     if not body:
-        return ""
+        return {
+            "ok": 200 <= status < 300,
+            "http_status": status,
+        }
 
     try:
         decoded = json.loads(body)
     except json.JSONDecodeError:
-        return body[:500]
+        return {
+            "ok": 200 <= status < 300,
+            "http_status": status,
+            "raw_body": body[:1000],
+        }
 
     if isinstance(decoded, dict):
-        message = decoded.get("message") or decoded.get("error") or decoded.get("status")
-        if message:
-            return str(message)
+        return {
+            "http_status": status,
+            **decoded,
+        }
 
-        return json.dumps(decoded, ensure_ascii=False)
-
-    return str(decoded)
+    return {
+        "ok": 200 <= status < 300,
+        "http_status": status,
+        "response": decoded,
+    }
 
 
 @function_tool
@@ -276,22 +286,31 @@ async def send_minecraft_instruction(
         str,
         "The natural-language instruction to send to Minecraft.",
     ],
-) -> str:
+) -> dict[str, Any]:
     """Sends a natural-language instruction to Minecraft."""
     clean_instruction = instruction.strip()
     if not clean_instruction:
-        return "Instruction cannot be empty."
+        return {
+            "ok": False,
+            "error": "Instruction cannot be empty.",
+        }
 
-    username = plugin_config.sunny_agent_flayer_default_username
+    username = plugin_config.sunny_agent_flayer_default_username.strip()
     if not username:
-        return (
-            "Minecraft username is required. Provide minecraft_username or configure "
-            "sunny_agent_flayer_default_username."
-        )
+        return {
+            "ok": False,
+            "error": (
+                "Minecraft username is required. Configure "
+                "sunny_agent_flayer_default_username."
+            ),
+        }
 
     url = plugin_config.sunny_agent_flayer_instruction_url.strip()
     if not url:
-        return "sunny_agent_flayer_instruction_url is not configured."
+        return {
+            "ok": False,
+            "error": "sunny_agent_flayer_instruction_url is not configured.",
+        }
 
     payload = {
         "username": username,
@@ -308,24 +327,25 @@ async def send_minecraft_instruction(
             plugin_config.sunny_agent_flayer_instruction_timeout_seconds,
         )
     except urllib.error.URLError as exc:
-        return f"Could not reach sunny-flayer instruction API at {url}: {exc.reason}"
+        return {
+            "ok": False,
+            "url": url,
+            "error": f"Could not reach sunny-flayer instruction API: {exc.reason}",
+        }
     except OSError as exc:
-        return f"Could not send instruction to sunny-flayer at {url}: {exc}"
+        return {
+            "ok": False,
+            "url": url,
+            "error": f"Could not send instruction to sunny-flayer: {exc}",
+        }
     except ValueError as exc:
-        return f"Invalid sunny-flayer instruction API URL {url!r}: {exc}"
+        return {
+            "ok": False,
+            "url": url,
+            "error": f"Invalid sunny-flayer instruction API URL {url!r}: {exc}",
+        }
 
-    response_summary = _summarize_sunny_flayer_response(body)
-
-    if 200 <= status < 300:
-        return (
-            f"sunny-flayer accepted instruction for {username}: "
-            f"{response_summary or 'OK'}"
-        )
-
-    return (
-        f"sunny-flayer rejected instruction for {username}: "
-        f"HTTP {status}: {response_summary or 'No response body.'}"
-    )
+    return _decode_sunny_flayer_response(status, body)
 
 
 @function_tool
