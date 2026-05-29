@@ -55,6 +55,7 @@ group_agent = Agent[tool.ChatContext](
         tool.group_member_list,
         tool.group_member_qq_by_nickname,
         tool.send_private_message,
+        tool.send_minecraft_instruction,
         tool.enable_active_group_message_receiving,
         tool.disable_active_group_message_receiving,
     ],
@@ -65,7 +66,10 @@ private_agent = Agent[tool.ChatContext](
     instructions=chat_instructions,
     model=MODEL_NAME,
     model_settings=model_settings,
-    tools=hosted_tools,
+    tools=[
+        *hosted_tools,
+        tool.send_minecraft_instruction,
+    ],
 )
 
 translator_agent = Agent(

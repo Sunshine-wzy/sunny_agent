@@ -14,3 +14,7 @@ class Config(BaseModel):
     sunny_agent_ai_daily_send_retry_times: int = Field(default=1, ge=0, le=5)
     sunny_agent_ai_daily_send_retry_delay_min_seconds: float = Field(default=10.0, ge=0)
     sunny_agent_ai_daily_send_retry_delay_max_seconds: float = Field(default=30.0, ge=0)
+    sunny_agent_flayer_instruction_url: str = "http://127.0.0.1:32123/instructions"
+    sunny_agent_flayer_instruction_token: str = ""
+    sunny_agent_flayer_default_username: str = "Sunshine_wzy"
+    sunny_agent_flayer_instruction_timeout_seconds: float = Field(default=15.0, gt=0)
