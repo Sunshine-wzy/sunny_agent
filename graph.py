@@ -41,7 +41,10 @@ chat_instructions = (
 model_settings = ModelSettings(reasoning=Reasoning(effort="medium"))
 hosted_tools = [
     WebSearchTool(),
-    ImageGenerationTool(tool_config={"type": "image_generation"}),
+    # ImageGenerationTool(tool_config={"type": "image_generation"}),
+]
+common_tools = [
+    # tool.send_minecraft_instruction,
 ]
 
 group_agent = Agent[tool.ChatContext](
@@ -51,11 +54,11 @@ group_agent = Agent[tool.ChatContext](
     model_settings=model_settings,
     tools=[
         *hosted_tools,
+        *common_tools,
         tool.group_name,
         tool.group_member_list,
         tool.group_member_qq_by_nickname,
         tool.send_private_message,
-        tool.send_minecraft_instruction,
         tool.enable_active_group_message_receiving,
         tool.disable_active_group_message_receiving,
     ],
@@ -68,7 +71,7 @@ private_agent = Agent[tool.ChatContext](
     model_settings=model_settings,
     tools=[
         *hosted_tools,
-        tool.send_minecraft_instruction,
+        *common_tools,
     ],
 )
 

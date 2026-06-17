@@ -1,11 +1,12 @@
 import re
 
-from nonebot import on_message
+from nonebot import on_message, on_notice
 from nonebot.adapters.onebot.v11 import (
     Bot,
     GroupMessageEvent,
     Message,
     MessageSegment,
+    PokeNotifyEvent,
     PrivateMessageEvent,
 )
 
@@ -20,7 +21,16 @@ async def _is_to_me_or_active_group(event) -> bool:
     return event.is_tome()
 
 
+async def _is_group_poke_to_bot(event, bot: Bot) -> bool:
+    return (
+        isinstance(event, PokeNotifyEvent)
+        and event.group_id is not None
+        and event.target_id == int(bot.self_id)
+    )
+
+
 llm = on_message(rule=_is_to_me_or_active_group, priority=10, block=False)
+poke_clear = on_notice(rule=_is_group_poke_to_bot, priority=10, block=False)
 CLEAR_CONTEXT_COMMANDS = {"/clear"}
 AT_SEGMENT_PATTERN = re.compile(
     r"\[CQ:at,qq=(?P<cq>all|\d+)(?:,[^\]]*)?\]"
@@ -62,6 +72,20 @@ def _build_group_response(response: str) -> Message:
         message.append(MessageSegment.text(response[cursor:]))
 
     return message
+
+
+@poke_clear.handle()
+async def handle_poke_clear_group(event: PokeNotifyEvent, bot: Bot):
+    if event.group_id is None:
+        return
+    try:
+        await clear_group_history(event.group_id)
+    except Exception as exc:
+        print(f"Failed to clear group context {event.group_id}: {exc}")
+        await bot.send_group_msg(group_id=event.group_id, message="Failed to clear context.")
+        await poke_clear.finish()
+    await bot.send_group_msg(group_id=event.group_id, message="Context cleared.")
+    await poke_clear.finish()
 
 
 @llm.handle()

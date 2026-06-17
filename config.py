@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 
 class Config(BaseModel):
     sunny_agent_ai_daily_enabled: bool = False
-    sunny_agent_ai_daily_rss_url: str = "https://imjuya.github.io/juya-ai-daily/rss.xml"
+    sunny_agent_ai_daily_rss_url: str = "https://daily.juya.uk/rss.xml"
     sunny_agent_ai_daily_hour: int = Field(default=9, ge=0, le=23)
     sunny_agent_ai_daily_minute: int = Field(default=0, ge=0, le=59)
     sunny_agent_ai_daily_timezone: str = "Asia/Shanghai"
