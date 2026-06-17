@@ -1,9 +1,11 @@
 import asyncio
 import json
+import os
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from agents import RunContextWrapper, function_tool
 from nonebot import get_plugin_config
@@ -22,6 +24,7 @@ class ChatContext:
 plugin_config = get_plugin_config(Config)
 ACTIVE_GROUP_RECEIVE_FILE = store.get_plugin_data_file("active_group_receive.json")
 active_group_receiving_group_ids: set[int] = set()
+DEFAULT_WEB_SEARCH_URL = "https://open.bigmodel.cn/api/paas/v4/web_search"
 
 
 def _load_active_group_receiving_group_ids() -> set[int]:
@@ -276,6 +279,152 @@ def _decode_sunny_flayer_response(status: int, body: str) -> dict[str, Any]:
         "ok": 200 <= status < 300,
         "http_status": status,
         "response": decoded,
+    }
+
+
+def _get_bigmodel_api_key() -> str:
+    return (
+        os.getenv("SUNNY_AGENT_WEB_SEARCH_API_KEY")
+        or os.getenv("SUNNY_AGENT_OPENAI_API_KEY")
+        or os.getenv("ZHIPUAI_API_KEY")
+        or os.getenv("BIGMODEL_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    ).strip()
+
+
+def _get_web_search_url() -> str:
+    return os.getenv("SUNNY_AGENT_WEB_SEARCH_URL", DEFAULT_WEB_SEARCH_URL).strip()
+
+
+def _post_bigmodel_web_search(
+    url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout: float = 20,
+) -> tuple[int, str]:
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": "sunny-agent/1.0",
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, body
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return exc.code, body
+
+
+@function_tool
+async def web_search(
+    ctx: RunContextWrapper[ChatContext],
+    query: Annotated[
+        str,
+        "The web search query. Keep it concise; BigModel recommends no more than 70 characters.",
+    ],
+    count: Annotated[int, "Number of search results to return, from 1 to 50."] = 5,
+    search_engine: Annotated[
+        Literal["search_std", "search_pro", "search_pro_sogou", "search_pro_quark"],
+        "BigModel search engine code.",
+    ] = "search_pro",
+    search_recency_filter: Annotated[
+        Literal["oneDay", "oneWeek", "oneMonth", "oneYear", "noLimit"],
+        "Restrict results to a time range.",
+    ] = "noLimit",
+    content_size: Annotated[
+        Literal["medium", "high"],
+        "How much webpage summary content to return.",
+    ] = "high",
+    search_domain_filter: Annotated[
+        str,
+        "Optional domain whitelist, such as www.example.com. Leave empty for all domains.",
+    ] = "",
+    search_intent: Annotated[
+        bool,
+        "Whether BigModel should first identify search intent before searching.",
+    ] = False,
+) -> dict[str, Any]:
+    """Searches the web using BigModel Web Search API and returns cited results."""
+    clean_query = query.strip()
+    if not clean_query:
+        return {"ok": False, "error": "Search query cannot be empty."}
+
+    if len(clean_query) > 70:
+        return {
+            "ok": False,
+            "error": "Search query is too long. BigModel recommends no more than 70 characters.",
+        }
+
+    if count < 1 or count > 50:
+        return {"ok": False, "error": "count must be between 1 and 50."}
+
+    api_key = _get_bigmodel_api_key()
+    if not api_key:
+        return {
+            "ok": False,
+            "error": (
+                "BigModel API key is not configured. Set SUNNY_AGENT_WEB_SEARCH_API_KEY, "
+                "SUNNY_AGENT_OPENAI_API_KEY, ZHIPUAI_API_KEY, BIGMODEL_API_KEY, or OPENAI_API_KEY."
+            ),
+        }
+
+    event = ctx.context.event
+    payload: dict[str, Any] = {
+        "search_query": clean_query,
+        "search_engine": search_engine,
+        "search_intent": search_intent,
+        "count": count,
+        "search_recency_filter": search_recency_filter,
+        "content_size": content_size,
+        "request_id": uuid.uuid4().hex,
+        "user_id": f"sunny_{event.user_id}",
+    }
+    clean_domain = search_domain_filter.strip()
+    if clean_domain:
+        payload["search_domain_filter"] = clean_domain
+
+    url = _get_web_search_url()
+    try:
+        status, body = await asyncio.to_thread(
+            _post_bigmodel_web_search,
+            url,
+            api_key,
+            payload,
+        )
+    except urllib.error.URLError as exc:
+        return {
+            "ok": False,
+            "url": url,
+            "error": f"Could not reach BigModel web search API: {exc.reason}",
+        }
+    except OSError as exc:
+        return {
+            "ok": False,
+            "url": url,
+            "error": f"Could not send BigModel web search request: {exc}",
+        }
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "url": url,
+            "error": f"Invalid BigModel web search URL {url!r}: {exc}",
+        }
+
+    decoded = _decode_sunny_flayer_response(status, body)
+    return {
+        "ok": 200 <= status < 300,
+        "url": url,
+        **decoded,
     }
 
 

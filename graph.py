@@ -4,22 +4,19 @@ from typing import Any
 
 from agents import (
     Agent,
-    ImageGenerationTool,
     ModelSettings,
     OpenAIProvider,
     RunConfig,
     Runner,
     SQLiteSession,
-    WebSearchTool,
     set_tracing_disabled,
 )
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
-from openai.types.shared import Reasoning
 
 from . import tool
 
 
-MODEL_NAME = os.getenv("SUNNY_AGENT_MODEL", "gpt-5.5")
+MODEL_NAME = os.getenv("SUNNY_AGENT_MODEL", "glm-5.2")
 MODEL_BASE_URL = os.getenv("SUNNY_AGENT_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
 MODEL_API_KEY = os.getenv("SUNNY_AGENT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 MAX_TURNS = int(os.getenv("SUNNY_AGENT_MAX_TURNS", "8"))
@@ -29,7 +26,7 @@ set_tracing_disabled(disabled=os.getenv("SUNNY_AGENT_ENABLE_TRACING", "").lower(
 model_provider = OpenAIProvider(
     api_key=MODEL_API_KEY,
     base_url=MODEL_BASE_URL,
-    use_responses=True,
+    use_responses=False,
 )
 
 chat_instructions = (
@@ -38,12 +35,14 @@ chat_instructions = (
     "群聊里如果需要真正 @ 某人，在最终回复中使用 [CQ:at,qq=QQ号]，不要写纯文本 @昵称。"
 )
 
-model_settings = ModelSettings(reasoning=Reasoning(effort="medium"))
-hosted_tools = [
-    WebSearchTool(),
-    # ImageGenerationTool(tool_config={"type": "image_generation"}),
-]
+model_settings = ModelSettings(
+    extra_body={
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "max",
+    },
+)
 common_tools = [
+    tool.web_search,
     # tool.send_minecraft_instruction,
 ]
 
@@ -53,7 +52,7 @@ group_agent = Agent[tool.ChatContext](
     model=MODEL_NAME,
     model_settings=model_settings,
     tools=[
-        *hosted_tools,
+        # *hosted_tools,
         *common_tools,
         tool.group_name,
         tool.group_member_list,
@@ -70,7 +69,7 @@ private_agent = Agent[tool.ChatContext](
     model=MODEL_NAME,
     model_settings=model_settings,
     tools=[
-        *hosted_tools,
+        # *hosted_tools,
         *common_tools,
     ],
 )
