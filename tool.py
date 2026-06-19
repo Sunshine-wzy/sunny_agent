@@ -320,7 +320,97 @@ def _post_image_generation(
         return exc.code, body
 
 
+def _truncate_debug_text(value: Any, limit: int = 4000) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+
+    return f"{text[:limit]}... [truncated {len(text) - limit} chars]"
+
+
+def _extract_image_generation_error(decoded: Any) -> str:
+    if isinstance(decoded, dict):
+        error = decoded.get("error")
+        if isinstance(error, dict):
+            for key in ("message", "detail", "code", "type"):
+                value = error.get(key)
+                if value:
+                    return str(value)
+            return json.dumps(error, ensure_ascii=False)
+
+        if error:
+            return str(error)
+
+        for key in ("message", "detail", "msg"):
+            value = decoded.get(key)
+            if value:
+                return str(value)
+
+    return "Image generation API request failed."
+
+
+def _image_generation_request_summary(
+    endpoint: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    summary = {
+        "url": endpoint,
+        "model": payload.get("model"),
+        "n": payload.get("n"),
+    }
+    if payload.get("size"):
+        summary["size"] = payload["size"]
+    if payload.get("prompt"):
+        summary["prompt_preview"] = _truncate_debug_text(payload["prompt"], 300)
+
+    return summary
+
+
+def _image_generation_failure_result(
+    *,
+    http_status: int | None,
+    error_message: str,
+    endpoint: str,
+    payload: dict[str, Any],
+    upstream_raw_body: str = "",
+    upstream_response: Any = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": False,
+        "http_status": http_status,
+        "error": error_message,
+        "error_message": error_message,
+        "request": _image_generation_request_summary(endpoint, payload),
+        "message": (
+            f"Image generation failed"
+            f"{f' with HTTP {http_status}' if http_status is not None else ''}: "
+            f"{error_message}"
+        ),
+    }
+    if upstream_raw_body:
+        result["upstream_raw_body"] = _truncate_debug_text(upstream_raw_body)
+    if upstream_response is not None:
+        result["upstream_response"] = upstream_response
+
+    return result
+
+
+def _log_image_generation_failure(result: dict[str, Any]) -> None:
+    debug_result = {
+        "http_status": result.get("http_status"),
+        "error_message": result.get("error_message") or result.get("error"),
+        "request": result.get("request"),
+        "upstream_raw_body": result.get("upstream_raw_body"),
+        "upstream_response": result.get("upstream_response"),
+    }
+    print(
+        "Image generation failed: "
+        + _truncate_debug_text(json.dumps(debug_result, ensure_ascii=False), 5000)
+    )
+
+
 def _decode_image_generation_response(status: int, body: str) -> dict[str, Any]:
+    raw_body = body.strip()
     try:
         decoded = json.loads(body)
     except json.JSONDecodeError:
@@ -328,7 +418,8 @@ def _decode_image_generation_response(status: int, body: str) -> dict[str, Any]:
             "ok": False,
             "http_status": status,
             "error": "Image generation API returned a non-JSON response.",
-            "raw_body": body[:1000],
+            "error_message": "Image generation API returned a non-JSON response.",
+            "upstream_raw_body": _truncate_debug_text(raw_body),
         }
 
     if not isinstance(decoded, dict):
@@ -336,14 +427,21 @@ def _decode_image_generation_response(status: int, body: str) -> dict[str, Any]:
             "ok": False,
             "http_status": status,
             "error": "Image generation API returned an unexpected response.",
-            "response": decoded,
+            "error_message": "Image generation API returned an unexpected response.",
+            "upstream_raw_body": _truncate_debug_text(raw_body),
+            "upstream_response": decoded,
         }
 
     if not 200 <= status < 300:
+        error_message = _extract_image_generation_error(decoded)
         return {
             "ok": False,
             "http_status": status,
-            "error": decoded.get("error") or decoded,
+            "error": error_message,
+            "error_message": error_message,
+            "upstream_error": decoded.get("error"),
+            "upstream_raw_body": _truncate_debug_text(raw_body),
+            "upstream_response": decoded,
         }
 
     data = decoded.get("data")
@@ -463,6 +561,7 @@ async def image_generation(
     if clean_size:
         payload["size"] = clean_size
 
+    endpoint = _image_generation_endpoint(plugin_config.sunny_agent_image_generation_base_url)
     try:
         status, body = await asyncio.to_thread(
             _post_image_generation,
@@ -472,26 +571,44 @@ async def image_generation(
             plugin_config.sunny_agent_image_generation_timeout_seconds,
         )
     except urllib.error.URLError as exc:
-        return {
-            "ok": False,
-            "url": _image_generation_endpoint(plugin_config.sunny_agent_image_generation_base_url),
-            "error": f"Could not reach image generation API: {exc.reason}",
-        }
+        result = _image_generation_failure_result(
+            http_status=None,
+            error_message=f"Could not reach image generation API: {exc.reason}",
+            endpoint=endpoint,
+            payload=payload,
+        )
+        _log_image_generation_failure(result)
+        return result
     except OSError as exc:
-        return {
-            "ok": False,
-            "url": _image_generation_endpoint(plugin_config.sunny_agent_image_generation_base_url),
-            "error": f"Could not call image generation API: {exc}",
-        }
+        result = _image_generation_failure_result(
+            http_status=None,
+            error_message=f"Could not call image generation API: {exc}",
+            endpoint=endpoint,
+            payload=payload,
+        )
+        _log_image_generation_failure(result)
+        return result
     except ValueError as exc:
-        return {
-            "ok": False,
-            "url": _image_generation_endpoint(plugin_config.sunny_agent_image_generation_base_url),
-            "error": f"Invalid image generation API URL: {exc}",
-        }
+        result = _image_generation_failure_result(
+            http_status=None,
+            error_message=f"Invalid image generation API URL: {exc}",
+            endpoint=endpoint,
+            payload=payload,
+        )
+        _log_image_generation_failure(result)
+        return result
 
     result = _decode_image_generation_response(status, body)
     if not result.get("ok"):
+        result.setdefault("request", _image_generation_request_summary(endpoint, payload))
+        result.setdefault(
+            "message",
+            (
+                f"Image generation failed with HTTP {result.get('http_status')}: "
+                f"{result.get('error_message') or result.get('error')}"
+            ),
+        )
+        _log_image_generation_failure(result)
         return result
 
     sent_images: list[dict[str, Any]] = []
