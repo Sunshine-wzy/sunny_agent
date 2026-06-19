@@ -18,3 +18,8 @@ class Config(BaseModel):
     sunny_agent_flayer_instruction_token: str = ""
     sunny_agent_flayer_default_username: str = "Sunshine_wzy"
     sunny_agent_flayer_instruction_timeout_seconds: float = Field(default=130.0, gt=0)
+    sunny_agent_image_generation_base_url: str = "https://www.geek2api.com/v1"
+    sunny_agent_image_generation_api_key: str = ""
+    sunny_agent_image_generation_model: str = "gpt-image-2"
+    sunny_agent_image_generation_size: str = "1024x1024"
+    sunny_agent_image_generation_timeout_seconds: float = Field(default=180.0, gt=0)

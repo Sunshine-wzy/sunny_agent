@@ -8,7 +8,7 @@ from typing import Annotated, Any
 from agents import RunContextWrapper, function_tool
 from nonebot import get_plugin_config
 import nonebot_plugin_localstore as store
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageSegment, PrivateMessageEvent
 
 from .config import Config
 
@@ -276,6 +276,249 @@ def _decode_sunny_flayer_response(status: int, body: str) -> dict[str, Any]:
         "ok": 200 <= status < 300,
         "http_status": status,
         "response": decoded,
+    }
+
+
+def _image_generation_endpoint(base_url: str) -> str:
+    cleaned_base_url = base_url.strip().rstrip("/")
+    if not cleaned_base_url:
+        cleaned_base_url = "https://api.openai.com/v1"
+
+    if cleaned_base_url.endswith("/images/generations"):
+        return cleaned_base_url
+
+    return f"{cleaned_base_url}/images/generations"
+
+
+def _post_image_generation(
+    base_url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout: float,
+) -> tuple[int, str]:
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": "sunny-agent/1.0",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    request = urllib.request.Request(
+        _image_generation_endpoint(base_url),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, body
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return exc.code, body
+
+
+def _decode_image_generation_response(status: int, body: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(body)
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "http_status": status,
+            "error": "Image generation API returned a non-JSON response.",
+            "raw_body": body[:1000],
+        }
+
+    if not isinstance(decoded, dict):
+        return {
+            "ok": False,
+            "http_status": status,
+            "error": "Image generation API returned an unexpected response.",
+            "response": decoded,
+        }
+
+    if not 200 <= status < 300:
+        return {
+            "ok": False,
+            "http_status": status,
+            "error": decoded.get("error") or decoded,
+        }
+
+    data = decoded.get("data")
+    if not isinstance(data, list) or not data:
+        return {
+            "ok": False,
+            "http_status": status,
+            "error": "Image generation API did not return any images.",
+            "response": decoded,
+        }
+
+    images: list[dict[str, Any]] = []
+    for index, item in enumerate(data, start=1):
+        if not isinstance(item, dict):
+            continue
+
+        image: dict[str, Any] = {"index": index}
+        if item.get("url"):
+            image["url"] = item["url"]
+        if item.get("b64_json"):
+            image["b64_json"] = item["b64_json"]
+        if item.get("revised_prompt"):
+            image["revised_prompt"] = item["revised_prompt"]
+        if image.keys() - {"index"}:
+            images.append(image)
+
+    if not images:
+        return {
+            "ok": False,
+            "http_status": status,
+            "error": "Image generation API returned images in an unsupported format.",
+            "response": decoded,
+        }
+
+    return {
+        "ok": True,
+        "http_status": status,
+        "created": decoded.get("created"),
+        "images": images,
+    }
+
+
+async def _send_generated_image(
+    ctx: RunContextWrapper[ChatContext],
+    image: dict[str, Any],
+) -> dict[str, Any]:
+    if image.get("url"):
+        segment = MessageSegment.image(image["url"])
+    elif image.get("b64_json"):
+        segment = MessageSegment.image(f"base64://{image['b64_json']}")
+    else:
+        return {
+            "sent": False,
+            "error": "Image result has no URL or base64 data.",
+        }
+
+    event = ctx.context.event
+    if isinstance(event, GroupMessageEvent):
+        await ctx.context.bot.send_group_msg(group_id=event.group_id, message=segment)
+    else:
+        await ctx.context.bot.send_private_msg(user_id=event.user_id, message=segment)
+
+    return {"sent": True}
+
+
+@function_tool
+async def image_generation(
+    ctx: RunContextWrapper[ChatContext],
+    prompt: Annotated[
+        str,
+        "The detailed image generation prompt.",
+    ],
+    size: Annotated[
+        str,
+        "Optional image size, such as 1024x1024, 1024x1536, or 1536x1024.",
+    ] = "",
+    n: Annotated[
+        int,
+        "Number of images to generate. Use 1 unless the user explicitly asks for more.",
+    ] = 1,
+) -> dict[str, Any]:
+    """Generates image(s) and sends them to the current chat."""
+    print(f"Generating image: prompt({prompt}), size({size}), n({n})")
+    clean_prompt = prompt.strip()
+    if not clean_prompt:
+        return {
+            "ok": False,
+            "error": "Prompt cannot be empty.",
+        }
+
+    api_key = plugin_config.sunny_agent_image_generation_api_key.strip()
+    if not api_key:
+        return {
+            "ok": False,
+            "error": "sunny_agent_image_generation_api_key is not configured.",
+        }
+
+    if n < 1 or n > 4:
+        return {
+            "ok": False,
+            "error": "n must be between 1 and 4.",
+        }
+
+    model = plugin_config.sunny_agent_image_generation_model.strip()
+    if not model:
+        return {
+            "ok": False,
+            "error": "sunny_agent_image_generation_model is not configured.",
+        }
+
+    clean_size = size.strip() or plugin_config.sunny_agent_image_generation_size.strip()
+    payload = {
+        "model": model,
+        "prompt": clean_prompt,
+        "n": n,
+    }
+    if clean_size:
+        payload["size"] = clean_size
+
+    try:
+        status, body = await asyncio.to_thread(
+            _post_image_generation,
+            plugin_config.sunny_agent_image_generation_base_url,
+            api_key,
+            payload,
+            plugin_config.sunny_agent_image_generation_timeout_seconds,
+        )
+    except urllib.error.URLError as exc:
+        return {
+            "ok": False,
+            "url": _image_generation_endpoint(plugin_config.sunny_agent_image_generation_base_url),
+            "error": f"Could not reach image generation API: {exc.reason}",
+        }
+    except OSError as exc:
+        return {
+            "ok": False,
+            "url": _image_generation_endpoint(plugin_config.sunny_agent_image_generation_base_url),
+            "error": f"Could not call image generation API: {exc}",
+        }
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "url": _image_generation_endpoint(plugin_config.sunny_agent_image_generation_base_url),
+            "error": f"Invalid image generation API URL: {exc}",
+        }
+
+    result = _decode_image_generation_response(status, body)
+    if not result.get("ok"):
+        return result
+
+    sent_images: list[dict[str, Any]] = []
+    for image in result["images"]:
+        send_result: dict[str, Any]
+        try:
+            send_result = await _send_generated_image(ctx, image)
+        except Exception as exc:
+            send_result = {
+                "sent": False,
+                "error": f"Generated image could not be sent to chat: {exc}",
+            }
+
+        safe_image = {
+            key: value
+            for key, value in image.items()
+            if key != "b64_json"
+        }
+        safe_image.update(send_result)
+        sent_images.append(safe_image)
+
+    return {
+        "ok": True,
+        "http_status": result["http_status"],
+        "created": result.get("created"),
+        "images": sent_images,
+        "message": "Generated image(s) were sent to the current chat.",
     }
 
 

@@ -4,7 +4,6 @@ from typing import Any
 
 from agents import (
     Agent,
-    ImageGenerationTool,
     ModelSettings,
     OpenAIProvider,
     RunConfig,
@@ -41,9 +40,9 @@ chat_instructions = (
 model_settings = ModelSettings(reasoning=Reasoning(effort="medium"))
 hosted_tools = [
     WebSearchTool(),
-    # ImageGenerationTool(tool_config={"type": "image_generation"}),
 ]
 common_tools = [
+    tool.image_generation,
     # tool.send_minecraft_instruction,
 ]
 
