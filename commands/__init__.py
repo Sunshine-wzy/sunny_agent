@@ -4,3 +4,4 @@ load_builtin_plugins("help")
 
 from . import mem_command
 from . import rss_command
+from . import tibo_command

@@ -14,6 +14,15 @@ class Config(BaseModel):
     sunny_agent_ai_daily_send_retry_times: int = Field(default=1, ge=0, le=5)
     sunny_agent_ai_daily_send_retry_delay_min_seconds: float = Field(default=10.0, ge=0)
     sunny_agent_ai_daily_send_retry_delay_max_seconds: float = Field(default=30.0, ge=0)
+    sunny_agent_tibo_username: str = "thsottiaux"
+    sunny_agent_tibo_api_base_url: str = "https://api.vxtwitter.com"
+    sunny_agent_tibo_poll_interval_seconds: int = Field(default=600, ge=60)
+    sunny_agent_tibo_request_timeout_seconds: float = Field(default=30.0, gt=0)
+    sunny_agent_tibo_timezone: str = "Asia/Shanghai"
+    sunny_agent_tibo_exclude_replies: bool = True
+    sunny_agent_tibo_exclude_reposts: bool = True
+    sunny_agent_tibo_send_retry_times: int = Field(default=1, ge=0, le=5)
+    sunny_agent_tibo_send_retry_delay_seconds: float = Field(default=10.0, ge=0)
     sunny_agent_flayer_instruction_url: str = "http://127.0.0.1:32123/instructions"
     sunny_agent_flayer_instruction_token: str = ""
     sunny_agent_flayer_default_username: str = "Sunshine_wzy"

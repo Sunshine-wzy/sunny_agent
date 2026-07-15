@@ -8,7 +8,13 @@ from typing import Any
 from agents import RunConfig, Runner
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment, PrivateMessageEvent
 
-from .graph import model_provider, run_group_chat, run_private_chat, translator_agent
+from .graph import (
+    model_provider,
+    run_group_chat,
+    run_private_chat,
+    tibo_translator_agent,
+    translator_agent,
+)
 
 
 IMAGE_TOKEN_HINT = "[user sent an image]"
@@ -262,6 +268,18 @@ async def atranslate(text: str) -> str:
         run_config=RunConfig(model_provider=model_provider),
     )
     return str(result.final_output or "")
+
+
+async def atranslate_to_chinese(text: str) -> str:
+    result = await Runner.run(
+        tibo_translator_agent,
+        text,
+        run_config=RunConfig(
+            model_provider=model_provider,
+            workflow_name="Tibo post translation",
+        ),
+    )
+    return str(result.final_output or "").strip()
 
 
 def translate(text: str) -> str:
