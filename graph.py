@@ -15,7 +15,7 @@ from agents import (
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
 from openai.types.shared import Reasoning
 
-from . import tool
+from . import agent_reach_tool, tool
 
 
 MODEL_NAME = os.getenv("SUNNY_AGENT_MODEL", "gpt-5.5")
@@ -43,11 +43,11 @@ hosted_tools = [
 ]
 common_tools = [
     tool.image_generation,
-    tool.agent_reach_status,
-    tool.agent_reach_search,
-    tool.agent_reach_read,
-    tool.agent_reach_browse,
-    tool.agent_reach_rss,
+    agent_reach_tool.agent_reach_status,
+    agent_reach_tool.agent_reach_search,
+    agent_reach_tool.agent_reach_read,
+    agent_reach_tool.agent_reach_browse,
+    agent_reach_tool.agent_reach_rss,
     # tool.send_minecraft_instruction,
 ]
 
