@@ -43,6 +43,11 @@ hosted_tools = [
 ]
 common_tools = [
     tool.image_generation,
+    tool.agent_reach_status,
+    tool.agent_reach_search,
+    tool.agent_reach_read,
+    tool.agent_reach_browse,
+    tool.agent_reach_rss,
     # tool.send_minecraft_instruction,
 ]
 

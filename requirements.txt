@@ -5,3 +5,5 @@ tabulate
 pandas
 openai==2.44.0
 openai-agents==0.18.0
+agent-reach @ https://github.com/Panniantong/agent-reach/archive/1494c2ab239e7355a77e7cceaf3271453a1f34b5.zip
+miku-ai==0.1.0
