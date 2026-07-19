@@ -1062,7 +1062,12 @@ def _agent_reach_bilibili_search_sync(query: str, limit: int) -> dict[str, Any]:
 
 @function_tool
 async def agent_reach_status() -> dict[str, Any]:
-    """Checks Agent Reach channels and reports the active backend for each platform."""
+    """Diagnose Agent Reach backend availability and configuration.
+
+    Call this only when the user asks for Agent Reach status/setup details, or
+    after another Agent Reach tool reports that a required backend is missing.
+    Do not call it before routine search, read, browse, or RSS requests.
+    """
     result = await _run_agent_reach_command(
         "agent-reach",
         "agent-reach",
@@ -1100,7 +1105,7 @@ async def agent_reach_status() -> dict[str, Any]:
 
 @function_tool
 async def agent_reach_search(
-    query: Annotated[str, "Search query."],
+    query: Annotated[str, "Keywords to search for; do not pass a content URL."],
     platform: Annotated[
         str,
         "Platform: web, twitter, youtube, bilibili, reddit, github, xiaohongshu, "
@@ -1112,7 +1117,13 @@ async def agent_reach_search(
         "Optional subtype: web/code; GitHub repos/code/issues/prs; LinkedIn people/jobs.",
     ] = "content",
 ) -> dict[str, Any]:
-    """Searches an allow-listed internet platform through Agent Reach backends."""
+    """Search a specific supported platform by keywords.
+
+    Use this for searches within X/Twitter, YouTube, Bilibili, Reddit, GitHub,
+    XiaoHongShu, WeChat, Weibo, LinkedIn, Instagram, Facebook, or V2EX. Use the
+    regular web-search tool for general internet searches. If the user already
+    supplied a direct content URL, call agent_reach_read instead.
+    """
     clean_query = query.strip()
     if not clean_query:
         return {"ok": False, "error": "query cannot be empty."}
@@ -1286,8 +1297,14 @@ async def agent_reach_search(
 
 @function_tool
 async def agent_reach_read(
-    target: Annotated[str, "URL, post ID, repository, username, or other platform identifier."],
-    platform: Annotated[str, "Platform name, or auto to detect it from a URL."] = "auto",
+    target: Annotated[
+        str,
+        "Direct content URL, post ID, repository, username, or platform identifier.",
+    ],
+    platform: Annotated[
+        str,
+        "Platform name, or auto to detect supported platform URLs by hostname.",
+    ] = "auto",
     content_kind: Annotated[
         str,
         "Content type such as content, transcript, metadata, thread, article, comments, "
@@ -1301,7 +1318,17 @@ async def agent_reach_read(
     languages: Annotated[str, "Comma-separated preferred subtitle languages."] = "zh-Hans,zh,en",
     max_chars: Annotated[int, "Maximum returned content characters, from 1000 to 30000."] = 20_000,
 ) -> dict[str, Any]:
-    """Reads content from a URL or platform identifier using Agent Reach routing."""
+    """Read content from a direct supported-platform URL or identifier.
+
+    Call this when the user provides a link from x.com/twitter.com,
+    youtube.com/youtu.be, bilibili.com/b23.tv, reddit.com/redd.it, github.com,
+    xiaohongshu.com/xhslink.com, douyin.com, mp.weixin.qq.com, weibo.com,
+    linkedin.com, instagram.com, facebook.com, or v2ex.com and asks to read,
+    summarize, extract, transcribe, inspect comments, or explain its content.
+    It can also extract an ordinary public webpage when its full text is needed.
+    Use platform='auto' for URLs. Do not use platform search when the direct URL
+    is already available.
+    """
     clean_target = target.strip()
     if not clean_target:
         return {"ok": False, "error": "target cannot be empty."}
@@ -1495,7 +1522,12 @@ async def agent_reach_browse(
     identifier: Annotated[str, "Optional username, subreddit, node, topic ID, or repository."] = "",
     limit: Annotated[int, "Number of items, from 1 to 20."] = 10,
 ) -> dict[str, Any]:
-    """Browses read-only timelines, hot lists, communities, and repository lists."""
+    """Browse platform collections such as feeds, hot lists, and repository lists.
+
+    Use this for timelines, rankings, subreddits, communities, saved/explore
+    lists, or GitHub issue/PR/run/release lists. Do not use it to read one direct
+    content URL or to perform a keyword search.
+    """
     try:
         clean_limit = _agent_reach_limit(limit)
     except ValueError as exc:
@@ -1623,7 +1655,12 @@ async def agent_reach_rss(
     url: Annotated[str, "Public RSS or Atom feed URL."],
     limit: Annotated[int, "Number of entries, from 1 to 20."] = 5,
 ) -> dict[str, Any]:
-    """Reads a public RSS or Atom feed through Agent Reach's feedparser backend."""
+    """Read entries from a direct public RSS or Atom feed URL.
+
+    Use this only when the supplied URL is an RSS/Atom feed, or the user
+    explicitly asks to read a site's feed. Use agent_reach_read for an ordinary
+    article or webpage URL.
+    """
     try:
         clean_limit = _agent_reach_limit(limit)
     except ValueError as exc:
