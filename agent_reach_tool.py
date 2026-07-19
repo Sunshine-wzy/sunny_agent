@@ -33,6 +33,15 @@ _AGENT_REACH_PLATFORMS = (
     "web, twitter, youtube, bilibili, reddit, github, xiaohongshu, douyin, "
     "wechat, weibo, linkedin, instagram, facebook, v2ex, rss"
 )
+_WECHAT_MAX_HTML_BYTES = 8_000_000
+_WECHAT_CAPTCHA_INDICATORS = (
+    "wappoc_appmsgcaptcha",
+    "js_verify",
+    "verify_container",
+    "环境异常",
+    "请完成安全验证",
+    "操作频繁",
+)
 
 
 def _clip_agent_reach_text(value: str, limit: int) -> tuple[str, bool]:
@@ -303,6 +312,420 @@ async def _agent_reach_jina_read(url: str, max_chars: int) -> dict[str, Any]:
     )
     result.update({"platform": "web", "backend": "Jina Reader", "source_url": clean_url})
     return result
+
+
+def _validate_wechat_article_url(url: str) -> str:
+    clean_url = _validate_agent_reach_url(url)
+    hostname = (urllib.parse.urlsplit(clean_url).hostname or "").lower()
+    if hostname != "mp.weixin.qq.com":
+        raise ValueError("A public mp.weixin.qq.com article URL is required.")
+    return clean_url
+
+
+def _wechat_article_is_blocked(content: str) -> bool:
+    return any(indicator in content for indicator in _WECHAT_CAPTCHA_INDICATORS)
+
+
+def _clean_wechat_text(value: str) -> str:
+    value = re.sub(r"[\u200b-\u200d\ufeff]", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _wechat_soup_to_plain_markdown(content: Any) -> str:
+    """Convert a WeChat article body without requiring markdownify."""
+    for image in content.select("img"):
+        source = str(image.get("src", "")).strip()
+        alt = str(image.get("alt", "image")).strip() or "image"
+        replacement = f"\n![{alt}]({source})\n" if source else "\n[image]\n"
+        image.replace_with(replacement)
+
+    for line_break in content.select("br"):
+        line_break.replace_with("\n")
+
+    for level in range(1, 7):
+        for heading in content.select(f"h{level}"):
+            heading.insert_before(f"\n{'#' * level} ")
+            heading.append("\n\n")
+
+    for item in content.select("li"):
+        item.insert_before("\n- ")
+        item.append("\n")
+
+    for quote in content.select("blockquote"):
+        quote.insert_before("\n> ")
+        quote.append("\n\n")
+
+    for link in content.select("a[href]"):
+        href = str(link.get("href", "")).strip()
+        if href and href not in link.get_text(" ", strip=True):
+            link.append(f" ({href})")
+
+    for block in content.select(
+        "p, div, section, article, ul, ol, table, tr, pre, figure, figcaption"
+    ):
+        block.append("\n\n")
+
+    return content.get_text("", strip=False)
+
+
+def _parse_wechat_article_html(
+    html_content: str,
+    source_url: str,
+    max_chars: int,
+    backend: str,
+) -> dict[str, Any]:
+    if _wechat_article_is_blocked(html_content):
+        return {
+            "ok": False,
+            "platform": "wechat",
+            "backend": backend,
+            "error": "WeChat returned a verification or CAPTCHA page.",
+        }
+
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError as exc:
+        return {
+            "ok": False,
+            "platform": "wechat",
+            "backend": backend,
+            "error": (
+                "The WeChat HTML parsing dependency is missing. Install "
+                f"beautifulsoup4: {exc}"
+            ),
+        }
+
+    try:
+        from markdownify import markdownify as markdownify_html
+    except ImportError:
+        markdownify_html = None
+
+    soup = BeautifulSoup(html_content, "html.parser")
+    content = soup.select_one("#js_content")
+    if content is None:
+        return {
+            "ok": False,
+            "platform": "wechat",
+            "backend": backend,
+            "error": "The response did not contain a WeChat article body.",
+        }
+
+    for image in content.select("img[data-src]"):
+        image["src"] = image.get("data-src", "")
+    for selector in (
+        "script",
+        "style",
+        ".qr_code_pc",
+        ".reward_area",
+        ".rich_media_tool",
+        ".like_a_look_info",
+        "#js_pc_qr_code",
+        ".share_notice",
+        ".reward_qrcode_area",
+    ):
+        for element in content.select(selector):
+            element.decompose()
+    for voice in content.select("mpvoice"):
+        name = str(voice.get("name", "Audio"))
+        voice.replace_with(f"[Audio: {name}]")
+    for video in content.select("mpvideo"):
+        name = str(video.get("data-title", video.get("title", "Video")))
+        video.replace_with(f"[Video: {name}]")
+
+    if markdownify_html is None:
+        body = _wechat_soup_to_plain_markdown(content)
+    else:
+        body = markdownify_html(
+            str(content),
+            heading_style="ATX",
+            bullets="-",
+        )
+    body = body.replace("\u00a0", " ")
+    body = re.sub(r"[ \t]+$", "", body, flags=re.MULTILINE)
+    body = re.sub(r"\n{4,}", "\n\n\n", body).strip()
+    if len(re.sub(r"\s+", "", body)) < 40:
+        return {
+            "ok": False,
+            "platform": "wechat",
+            "backend": backend,
+            "error": "The WeChat article body was empty or too short.",
+        }
+
+    title_element = soup.select_one("#activity-name")
+    author_element = soup.select_one("#js_name")
+    title = (
+        _clean_wechat_text(title_element.get_text(" ", strip=True))
+        if title_element
+        else ""
+    )
+    author = (
+        _clean_wechat_text(author_element.get_text(" ", strip=True))
+        if author_element
+        else ""
+    )
+    publish_match = re.search(
+        r"create_time\s*[:=]\s*(?:JsDecode\(\s*)?['\"]?(\d{10})",
+        html_content,
+    )
+    publish_timestamp = int(publish_match.group(1)) if publish_match else None
+
+    parts: list[str] = []
+    if title:
+        parts.append(f"# {title}")
+    metadata = []
+    if author:
+        metadata.append(f"Author: {author}")
+    if publish_timestamp is not None:
+        metadata.append(f"Published timestamp: {publish_timestamp}")
+    metadata.append(f"Source: {source_url}")
+    parts.append("\n".join(f"> {item}" for item in metadata))
+    parts.append(body)
+    content_text, truncated = _clip_agent_reach_text("\n\n".join(parts), max_chars)
+    return {
+        "ok": True,
+        "platform": "wechat",
+        "backend": backend,
+        "source_url": source_url,
+        "title": title,
+        "author": author,
+        "published_timestamp": publish_timestamp,
+        "content": content_text,
+        "truncated": truncated,
+    }
+
+
+def _read_wechat_article_direct_sync(
+    url: str,
+    max_chars: int,
+) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            final_url = response.geturl()
+            raw = response.read(_WECHAT_MAX_HTML_BYTES + 1)
+            if len(raw) > _WECHAT_MAX_HTML_BYTES:
+                return {
+                    "ok": False,
+                    "platform": "wechat",
+                    "backend": "WeChat direct reader",
+                    "error": "WeChat article HTML exceeded the 8 MB safety limit.",
+                }
+            charset = response.headers.get_content_charset() or "utf-8"
+            html_content = raw.decode(charset, errors="replace")
+    except urllib.error.HTTPError as exc:
+        return {
+            "ok": False,
+            "platform": "wechat",
+            "backend": "WeChat direct reader",
+            "error": f"WeChat returned HTTP {exc.code}: {exc.reason}",
+        }
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {
+            "ok": False,
+            "platform": "wechat",
+            "backend": "WeChat direct reader",
+            "error": f"Could not fetch the WeChat article: {exc}",
+        }
+
+    if "wappoc_appmsgcaptcha" in final_url:
+        return {
+            "ok": False,
+            "platform": "wechat",
+            "backend": "WeChat direct reader",
+            "error": "WeChat redirected the request to a verification page.",
+        }
+    return _parse_wechat_article_html(
+        html_content,
+        url,
+        max_chars,
+        "WeChat direct reader",
+    )
+
+
+async def _read_wechat_markdown_export(
+    backend: str,
+    executable: str,
+    arguments: list[str],
+    output_dir: Path,
+    max_chars: int,
+) -> dict[str, Any]:
+    result = await _run_agent_reach_command(
+        backend,
+        executable,
+        arguments,
+        timeout=180,
+        max_output_chars=4_000,
+    )
+    if not result.get("ok"):
+        result["platform"] = "wechat"
+        return result
+    markdown_files = sorted(
+        output_dir.rglob("*.md"),
+        key=lambda path: path.stat().st_size,
+        reverse=True,
+    )
+    if not markdown_files:
+        return {
+            "ok": False,
+            "platform": "wechat",
+            "backend": backend,
+            "error": "The WeChat exporter completed but produced no Markdown file.",
+        }
+    content = markdown_files[0].read_text(encoding="utf-8", errors="replace")
+    clipped_content, truncated = _clip_agent_reach_text(content, max_chars)
+    return {
+        "ok": True,
+        "platform": "wechat",
+        "backend": backend,
+        "content": clipped_content,
+        "truncated": truncated,
+    }
+
+
+async def _agent_reach_wechat_read(url: str, max_chars: int) -> dict[str, Any]:
+    try:
+        clean_url = _validate_wechat_article_url(url)
+    except ValueError as exc:
+        return {"ok": False, "platform": "wechat", "error": str(exc)}
+
+    attempts: list[dict[str, str]] = []
+    direct_result = await asyncio.to_thread(
+        _read_wechat_article_direct_sync,
+        clean_url,
+        max_chars,
+    )
+    if direct_result.get("ok"):
+        return direct_result
+    attempts.append(
+        {
+            "backend": str(direct_result.get("backend", "WeChat direct reader")),
+            "error": str(direct_result.get("error", "Direct reading failed."))[:1_000],
+        }
+    )
+
+    article_reader = (
+        Path.home()
+        / ".agent-reach"
+        / "tools"
+        / "wechat-article-for-ai"
+        / "main.py"
+    )
+    if article_reader.is_file():
+        with tempfile.TemporaryDirectory(prefix="sunny-wechat-") as temp_dir:
+            output_dir = Path(temp_dir)
+            external_result = await _read_wechat_markdown_export(
+                "wechat-article-for-ai",
+                sys.executable,
+                [
+                    str(article_reader),
+                    clean_url,
+                    "--output",
+                    str(output_dir),
+                    "--no-images",
+                    "--force",
+                ],
+                output_dir,
+                max_chars,
+            )
+        if external_result.get("ok"):
+            external_result["fallbacks_tried"] = attempts
+            return external_result
+        attempts.append(
+            {
+                "backend": "wechat-article-for-ai",
+                "error": str(external_result.get("error", "Exporter failed."))[:1_000],
+            }
+        )
+
+    if shutil.which("opencli"):
+        with tempfile.TemporaryDirectory(prefix="sunny-wechat-opencli-") as temp_dir:
+            output_dir = Path(temp_dir)
+            opencli_result = await _read_wechat_markdown_export(
+                "OpenCLI WeChat",
+                "opencli",
+                [
+                    "weixin",
+                    "download",
+                    "--url",
+                    clean_url,
+                    "--output",
+                    str(output_dir),
+                ],
+                output_dir,
+                max_chars,
+            )
+        if opencli_result.get("ok"):
+            opencli_result["fallbacks_tried"] = attempts
+            return opencli_result
+        attempts.append(
+            {
+                "backend": "OpenCLI WeChat",
+                "error": str(opencli_result.get("error", "OpenCLI failed."))[:1_000],
+            }
+        )
+
+    exa_result = await _run_agent_reach_candidates(
+        "wechat",
+        [
+            _mcp_candidate(
+                "Exa web fetch",
+                "exa.web_fetch_exa",
+                urls=[clean_url],
+                maxCharacters=max_chars,
+            )
+        ],
+        max_output_chars=max_chars,
+    )
+    if exa_result.get("ok") and len(str(exa_result.get("content", ""))) >= 100:
+        exa_result["fallbacks_tried"] = attempts
+        return exa_result
+    attempts.append(
+        {
+            "backend": "Exa web fetch",
+            "error": str(exa_result.get("error", "Exa returned no article content."))[:1_000],
+        }
+    )
+
+    jina_result = await _agent_reach_jina_read(clean_url, max_chars)
+    jina_content = str(jina_result.get("content", ""))
+    if (
+        jina_result.get("ok")
+        and len(jina_content) >= 100
+        and not _wechat_article_is_blocked(jina_content)
+    ):
+        jina_result["platform"] = "wechat"
+        jina_result["fallbacks_tried"] = attempts
+        return jina_result
+    attempts.append(
+        {
+            "backend": "Jina Reader",
+            "error": str(jina_result.get("error", "Jina returned no article content."))[:1_000],
+        }
+    )
+    return {
+        "ok": False,
+        "platform": "wechat",
+        "error": (
+            "All WeChat article reading backends failed. The URL may require "
+            "verification or may no longer be public."
+        ),
+        "attempts": attempts,
+        "setup_hint": (
+            "Optional enhanced reader: clone bzd6661/wechat-article-for-ai to "
+            "~/.agent-reach/tools/wechat-article-for-ai and install its requirements."
+        ),
+    }
 
 
 def _agent_reach_platform_from_target(target: str) -> str:
@@ -1005,23 +1428,7 @@ async def agent_reach_read(
         )
 
     if platform_name == "wechat":
-        article_reader = Path.home() / ".agent-reach" / "tools" / "wechat-article-for-ai" / "main.py"
-        if not article_reader.is_file():
-            return {
-                "ok": False,
-                "platform": platform_name,
-                "error": (
-                    "The Agent Reach WeChat article reader is not installed. "
-                    "Configure the WeChat channel before reading mp.weixin.qq.com URLs."
-                ),
-            }
-        return await _run_agent_reach_command(
-            "Camoufox WeChat reader",
-            sys.executable,
-            [str(article_reader), clean_target],
-            timeout=120,
-            max_output_chars=max_chars,
-        )
+        return await _agent_reach_wechat_read(clean_target, max_chars)
 
     if platform_name == "weibo":
         result = await _agent_reach_jina_read(clean_target, max_chars)
