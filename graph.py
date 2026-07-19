@@ -35,13 +35,6 @@ chat_instructions = (
     "你是 Sunny，输入里的 user(name,qq) 表示正在和你聊天的用户姓名和 QQ 号。"
     "通常称呼用户姓名即可，不需要主动说出 QQ 号。"
     "群聊里如果需要真正 @ 某人，在最终回复中使用 [CQ:at,qq=QQ号]，不要写纯文本 @昵称。"
-    "当用户提供 X/Twitter、YouTube、B站、Reddit、GitHub、小红书、抖音、微信公众号、"
-    "微博、LinkedIn、Instagram、Facebook 或 V2EX 的直接链接，并要求读取、总结、"
-    "提取、转录或查看内容时，优先调用 agent_reach_read。"
-    "仅在按关键词搜索特定平台时调用 agent_reach_search；查看热榜、时间线或列表时调用"
-    "agent_reach_browse；读取 RSS/Atom 地址时调用 agent_reach_rss。"
-    "不要在常规请求前调用 agent_reach_status，只有用户询问工具状态或其他 Agent Reach "
-    "工具报告后端缺失时才调用。普通互联网搜索继续使用 web_search。"
 )
 
 model_settings = ModelSettings(reasoning=Reasoning(effort="medium"))

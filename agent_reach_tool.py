@@ -1108,21 +1108,20 @@ async def agent_reach_search(
     query: Annotated[str, "Keywords to search for; do not pass a content URL."],
     platform: Annotated[
         str,
-        "Platform: web, twitter, youtube, bilibili, reddit, github, xiaohongshu, "
-        "wechat, weibo, linkedin, instagram, facebook, or v2ex.",
-    ] = "web",
+        "Use wechat to search WeChat public articles.",
+    ] = "wechat",
     limit: Annotated[int, "Number of results, from 1 to 20."] = 5,
     search_kind: Annotated[
         str,
-        "Optional subtype: web/code; GitHub repos/code/issues/prs; LinkedIn people/jobs.",
+        "Use content when searching WeChat public articles.",
     ] = "content",
 ) -> dict[str, Any]:
-    """Search a specific supported platform by keywords.
+    """Search WeChat public articles by keywords.
 
-    Use this for searches within X/Twitter, YouTube, Bilibili, Reddit, GitHub,
-    XiaoHongShu, WeChat, Weibo, LinkedIn, Instagram, Facebook, or V2EX. Use the
-    regular web-search tool for general internet searches. If the user already
-    supplied a direct content URL, call agent_reach_read instead.
+    Use this only for keyword searches targeting WeChat public articles. Use
+    the regular web-search tool for general internet searches. If the user
+    already supplied an mp.weixin.qq.com article URL, call agent_reach_read
+    instead.
     """
     clean_query = query.strip()
     if not clean_query:
@@ -1299,35 +1298,36 @@ async def agent_reach_search(
 async def agent_reach_read(
     target: Annotated[
         str,
-        "Direct content URL, post ID, repository, username, or platform identifier.",
+        "Direct public WeChat article URL on mp.weixin.qq.com.",
     ],
     platform: Annotated[
         str,
-        "Platform name, or auto to detect supported platform URLs by hostname.",
+        "Use auto or wechat for a WeChat article URL.",
     ] = "auto",
     content_kind: Annotated[
         str,
-        "Content type such as content, transcript, metadata, thread, article, comments, "
-        "profile, company, issue, pull_request, or download_link.",
+        "Use content or article when reading a WeChat article.",
     ] = "content",
     context_token: Annotated[
         str,
-        "Optional platform context token, such as a XiaoHongShu xsec_token from search results.",
+        "Reserved context token; leave empty for WeChat articles.",
     ] = "",
-    include_comments: Annotated[bool, "Include comments when the backend supports them."] = False,
-    languages: Annotated[str, "Comma-separated preferred subtitle languages."] = "zh-Hans,zh,en",
+    include_comments: Annotated[
+        bool,
+        "Reserved option; the WeChat reader returns the article body.",
+    ] = False,
+    languages: Annotated[
+        str,
+        "Reserved option; it is not used for WeChat articles.",
+    ] = "zh-Hans,zh,en",
     max_chars: Annotated[int, "Maximum returned content characters, from 1000 to 30000."] = 20_000,
 ) -> dict[str, Any]:
-    """Read content from a direct supported-platform URL or identifier.
+    """Read a public WeChat article from an mp.weixin.qq.com URL.
 
-    Call this when the user provides a link from x.com/twitter.com,
-    youtube.com/youtu.be, bilibili.com/b23.tv, reddit.com/redd.it, github.com,
-    xiaohongshu.com/xhslink.com, douyin.com, mp.weixin.qq.com, weibo.com,
-    linkedin.com, instagram.com, facebook.com, or v2ex.com and asks to read,
-    summarize, extract, transcribe, inspect comments, or explain its content.
-    It can also extract an ordinary public webpage when its full text is needed.
-    Use platform='auto' for URLs. Do not use platform search when the direct URL
-    is already available.
+    Call this when the user provides a public WeChat article link and asks to
+    read, summarize, extract, or explain its content. Use platform='auto' for
+    the URL. Do not call it for other platform links until those platforms have
+    been separately verified.
     """
     clean_target = target.strip()
     if not clean_target:
@@ -1512,21 +1512,23 @@ async def agent_reach_read(
 async def agent_reach_browse(
     platform: Annotated[
         str,
-        "Platform: twitter, reddit, bilibili, xiaohongshu, instagram, facebook, v2ex, or github.",
+        "Reserved collection platform name; not for WeChat article links.",
     ],
     section: Annotated[
         str,
-        "Section such as feed, user_posts, hot, popular, subreddit, rank, explore, saved, "
-        "groups, node, issues, prs, runs, or releases.",
+        "Reserved collection section; not used to read a WeChat article.",
     ] = "feed",
-    identifier: Annotated[str, "Optional username, subreddit, node, topic ID, or repository."] = "",
+    identifier: Annotated[
+        str,
+        "Reserved collection identifier; leave empty for WeChat article reading.",
+    ] = "",
     limit: Annotated[int, "Number of items, from 1 to 20."] = 10,
 ) -> dict[str, Any]:
-    """Browse platform collections such as feeds, hot lists, and repository lists.
+    """Browse an explicitly requested Agent Reach collection.
 
-    Use this for timelines, rankings, subreddits, communities, saved/explore
-    lists, or GitHub issue/PR/run/release lists. Do not use it to read one direct
-    content URL or to perform a keyword search.
+    This capability is not used for WeChat article links. Call
+    agent_reach_read for an mp.weixin.qq.com article URL. Do not infer use of
+    this tool from an unverified platform link.
     """
     try:
         clean_limit = _agent_reach_limit(limit)
