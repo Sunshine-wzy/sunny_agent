@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 
 import nonebot
+from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 
 if TYPE_CHECKING:
     from rss_daily import FeedItem
@@ -45,12 +46,26 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
             cls.rss = importlib.import_module("rss_test_plugin.rss_daily")
             cls.chat = importlib.import_module("rss_test_plugin.chat")
             cls.graph = importlib.import_module("rss_test_plugin.graph")
+            cls.context = importlib.import_module("rss_test_plugin.context")
 
     def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        manager = self.context.ConversationManager(
+            Path(directory.name) / "context.sqlite3"
+        )
+        self.addCleanup(manager.store.close)
+        patch.object(self.context, "_manager", manager).start()
         self.state = self.rss.AiDailyRssState({}, {123}, set())
         self.bot = Mock(self_id="42")
-        self.bot.send_group_msg = AsyncMock()
-        self.bot.call_api = AsyncMock()
+        self.receipt_id = 1000
+
+        async def receipt(*args, **kwargs):
+            self.receipt_id += 1
+            return {"message_id": self.receipt_id}
+
+        self.bot.send_group_msg = AsyncMock(side_effect=receipt)
+        self.bot.call_api = AsyncMock(side_effect=receipt)
         self.commentary = (
             "模型开放挺好，不过部署成本要是太高，还是很难用起来。\n\n"
             "这个编程工具倒是想试试，看看改老项目时能不能少踩点坑。\n\n"
@@ -178,7 +193,7 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_forward_still_sends_commentary_using_full_report(
         self,
     ) -> None:
-        self.bot.call_api.side_effect = self.rss.ActionFailed(
+        self.bot.call_api.side_effect = ActionFailed(
             status="failed",
             retcode=1200,
             message="发送转发消息失败",
@@ -207,7 +222,7 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_failed_overview_does_not_generate_commentary(self) -> None:
-        self.bot.send_group_msg.side_effect = self.rss.ActionFailed(
+        self.bot.send_group_msg.side_effect = ActionFailed(
             status="failed",
             retcode=1200,
             message="发送消息失败",
@@ -226,9 +241,7 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.bot.send_group_msg.side_effect = [
             {},
-            self.rss.ActionFailed(
-                status="failed", retcode=1200, message="发送消息失败"
-            ),
+            ActionFailed(status="failed", retcode=1200, message="发送消息失败"),
             {},
         ]
         result = await self.rss.send_items_to_group(
@@ -254,7 +267,7 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
                 self.bot.reset_mock()
                 state = self.rss.AiDailyRssState({}, set(), set())
                 result = await self.rss.send_items_to_group(
-                    123, [self.item("new")], state
+                    123, [self.item("new")], state, only_unsent=False
                 )
                 self.assertEqual(result, (1, True))
                 self.assertEqual(state.sent_item_ids["123"], ["new"])
@@ -336,6 +349,139 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("session", runner.call_args.kwargs)
         self.assertEqual(self.graph.ai_daily_commentator_agent.tools, [])
+
+    async def test_all_report_messages_share_context_without_activating(self):
+        manager = self.context.get_manager()
+        scope = self.context.Scope("42", "group", "123")
+        active = await manager.get_active_session(scope)
+        await self.rss.send_items_to_group(123, [self.item("new")], self.state)
+        bindings = [
+            await manager.lookup_message(scope, message_id)
+            for message_id in range(1001, self.receipt_id + 1)
+        ]
+        self.assertEqual(len(bindings), 3)
+        self.assertTrue(all(binding is not None for binding in bindings))
+        report = bindings[0].conversation
+        self.assertTrue(all(binding.conversation == report for binding in bindings))
+        self.assertEqual(await manager.get_active_session(scope), active)
+        entries = await manager.call("entries", report)
+        self.assertEqual(
+            [entry["kind"] for entry in entries], ["external", "assistant_publication"]
+        )
+        self.assertIn("评测 new", str(entries))
+        self.assertNotIn("评测 new", bindings[0].content.plain_text())
+        controller = importlib.import_module("rss_test_plugin.conversation_chat")
+        from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
+
+        event = GroupMessageEvent.model_validate(
+            {
+                "time": 1,
+                "self_id": 42,
+                "post_type": "message",
+                "message_type": "group",
+                "sub_type": "normal",
+                "message_id": 1,
+                "user_id": 100,
+                "group_id": 123,
+                "message": Message(""),
+                "raw_message": "",
+                "font": 0,
+                "sender": {"user_id": 100, "nickname": "Alice"},
+            }
+        )
+        event.reply = types.SimpleNamespace(message_id=1002)
+        await controller.handle_message(event, self.bot)
+        self.assertEqual(await manager.get_active_session(scope), report)
+
+    async def test_manual_resends_do_not_duplicate_full_context(self):
+        manager = self.context.get_manager()
+        for _ in range(2):
+            await self.rss.send_items_to_group(
+                123, [self.item("new")], self.state, only_unsent=False
+            )
+        scope = self.context.Scope("42", "group", "123")
+        report = (await manager.lookup_message(scope, 1001)).conversation
+        entries = await manager.call("entries", report)
+        self.assertEqual(sum(entry["kind"] == "external" for entry in entries), 1)
+        self.assertEqual(self.bot.send_group_msg.await_count, 4)
+
+    async def test_scheduled_retry_reuses_receipts_when_legacy_state_is_lost(self):
+        for _ in range(2):
+            state = self.rss.AiDailyRssState({}, set(), set())
+            result = await self.rss.send_items_to_group(123, [self.item("new")], state)
+            self.assertEqual(result, (1, True))
+        self.assertEqual(self.bot.send_group_msg.await_count, 2)
+        self.bot.call_api.assert_awaited_once()
+        self.generate.assert_awaited_once()
+
+    async def test_failed_forward_retry_skips_confirmed_overview(self):
+        self.bot.call_api.side_effect = [
+            ActionFailed(status="failed", retcode=1),
+            {"message_id": 5000},
+        ]
+        await self.rss.send_items_to_group(123, [self.item("new")], self.state)
+        self.assertEqual(self.bot.send_group_msg.await_count, 2)
+        result = await self.rss.send_items_to_group(123, [self.item("new")], self.state)
+        self.assertEqual(result, (1, True))
+        self.assertEqual(self.bot.send_group_msg.await_count, 2)
+        self.assertEqual(self.bot.call_api.await_count, 2)
+
+    async def test_forward_resource_id_is_not_used_as_message_id(self):
+        self.bot.call_api.side_effect = None
+        self.bot.call_api.return_value = {"forward_id": "resource-only"}
+        await self.rss.send_items_to_group(123, [self.item("new")], self.state)
+        self.assertIsNone(
+            await self.context.get_manager().lookup_message(
+                self.context.Scope("42", "group", "123"),
+                "resource-only",
+            )
+        )
+
+    async def test_network_uncertainty_stops_fallback_and_retry(self):
+        self.bot.send_group_msg.side_effect = NetworkError("timeout")
+        fallback = Mock(
+            self_id="43", send_group_msg=AsyncMock(return_value={"message_id": 4000})
+        )
+        with patch.object(
+            self.rss, "connected_onebot_bots", return_value=[self.bot, fallback]
+        ):
+            for _ in range(2):
+                result = await self.rss.send_items_to_group(
+                    123, [self.item("new")], self.state
+                )
+                self.assertEqual(result, (0, False))
+        self.bot.send_group_msg.assert_awaited_once()
+        fallback.send_group_msg.assert_not_awaited()
+
+    async def test_fallback_bot_owns_message_and_later_retry_does_not_resend(self):
+        self.bot.send_group_msg.side_effect = ActionFailed(status="failed", retcode=1)
+        fallback = Mock(
+            self_id="43", send_group_msg=AsyncMock(return_value={"message_id": 4000})
+        )
+        publication = self.rss.make_rss_publication(
+            [self.item("new")], only_unsent=True
+        )
+        with patch.object(
+            self.rss, "connected_onebot_bots", return_value=[self.bot, fallback]
+        ):
+            result = await self.rss.send_group_text(
+                123, "overview", publication=publication
+            )
+            self.assertTrue(result)
+            self.bot.send_group_msg.side_effect = None
+            self.bot.send_group_msg.return_value = {"message_id": 4001}
+            result = await self.rss.send_group_text(
+                123, "overview", publication=publication
+            )
+            self.assertTrue(result)
+        manager = self.context.get_manager()
+        self.assertIsNotNone(
+            await manager.lookup_message(self.context.Scope("43", "group", "123"), 4000)
+        )
+        self.assertIsNone(
+            await manager.lookup_message(self.context.Scope("42", "group", "123"), 4000)
+        )
+        self.bot.send_group_msg.assert_awaited_once()
 
 
 if __name__ == "__main__":

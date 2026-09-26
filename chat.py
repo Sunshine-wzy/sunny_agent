@@ -6,8 +6,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from agents import RunConfig, Runner
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment, PrivateMessageEvent
+from nonebot.adapters.onebot.v11 import (
+    Bot,
+    GroupMessageEvent,
+    Message,
+    MessageSegment,
+    PrivateMessageEvent,
+)
 
+from .context import TurnContext
 from .graph import (
     ai_daily_commentator_agent,
     model_provider,
@@ -16,7 +23,6 @@ from .graph import (
     tibo_translator_agent,
     translator_agent,
 )
-
 
 IMAGE_TOKEN_HINT = "[user sent an image]"
 MessageEvent = GroupMessageEvent | PrivateMessageEvent
@@ -48,7 +54,9 @@ def _get_field(data: Any, field: str, default: Any = None) -> Any:
 
 
 def _get_sender_name(sender: Any) -> str:
-    return str(_get_field(sender, "card") or _get_field(sender, "nickname") or "Unknown")
+    return str(
+        _get_field(sender, "card") or _get_field(sender, "nickname") or "Unknown"
+    )
 
 
 def _get_sender_user_id(sender: Any) -> int | str:
@@ -80,7 +88,11 @@ def _message_has_image(message: Message) -> bool:
 
 
 def _message_text(message: Message, *, skip_reply: bool = False) -> str:
-    return "".join(str(segment) for segment in message if not (skip_reply and segment.type == "reply"))
+    return "".join(
+        str(segment)
+        for segment in message
+        if not (skip_reply and segment.type == "reply")
+    )
 
 
 def _reply_segment_message_id(message: Message) -> int | str | None:
@@ -95,12 +107,14 @@ def _reply_segment_message_id(message: Message) -> int | str | None:
     return None
 
 
-async def _get_referenced_message(event: MessageEvent, bot: Bot) -> ReferencedMessage | None:
+async def _get_referenced_message(
+    event: MessageEvent, bot: Bot
+) -> ReferencedMessage | None:
     reply = getattr(event, "reply", None)
     if reply is not None:
         message = _get_field(reply, "message")
         sender = _get_field(reply, "sender")
-        if message is not None:
+        if message is not None and _reference_scope_matches(event, reply):
             return ReferencedMessage(
                 message_id=_get_field(reply, "message_id"),
                 user_name=_get_sender_name(sender),
@@ -119,12 +133,26 @@ async def _get_referenced_message(event: MessageEvent, bot: Bot) -> ReferencedMe
         return None
 
     sender = message_info.get("sender") or {}
+    if not _reference_scope_matches(event, message_info):
+        return None
     return ReferencedMessage(
         message_id=message_info.get("message_id", message_id),
         user_name=_get_sender_name(sender),
         user_id=_get_sender_user_id(sender),
-        message=_coerce_message(message_info.get("message") or message_info.get("raw_message")),
+        message=_coerce_message(
+            message_info.get("message") or message_info.get("raw_message")
+        ),
     )
+
+
+def _reference_scope_matches(event: MessageEvent, info: Any) -> bool:
+    if isinstance(event, GroupMessageEvent):
+        return _get_field(info, "message_type") == "group" and str(
+            _get_field(info, "group_id")
+        ) == str(event.group_id)
+    return _get_field(info, "message_type") == "private" and str(
+        _get_field(info, "user_id")
+    ) == str(event.user_id)
 
 
 def _download_image_as_data_url(url: str, file_hint: str = "") -> str:
@@ -140,7 +168,9 @@ def _download_image_as_data_url(url: str, file_hint: str = "") -> str:
     return f"data:{content_type};base64,{encoded}"
 
 
-async def _build_image_block(segment: MessageSegment, bot: Bot) -> dict[str, Any] | None:
+async def _build_image_block(
+    segment: MessageSegment, bot: Bot
+) -> dict[str, Any] | None:
     image_url = segment.data.get("url")
     image_file = segment.data.get("file", "")
 
@@ -156,8 +186,13 @@ async def _build_image_block(segment: MessageSegment, bot: Bot) -> dict[str, Any
         print(f"Image segment missing url: {segment}")
         return None
 
+    if image_url.startswith("data:image/"):
+        return {"type": "input_image", "image_url": image_url}
+
     try:
-        data_url = await asyncio.to_thread(_download_image_as_data_url, image_url, image_file)
+        data_url = await asyncio.to_thread(
+            _download_image_as_data_url, image_url, image_file
+        )
     except Exception as exc:
         print(f"Failed to download image {image_url}: {exc}")
         return None
@@ -206,22 +241,35 @@ async def _build_agent_input(
     event: MessageEvent,
     bot: Bot,
     user_name: str,
+    *,
+    referenced_message: ReferencedMessage | None = None,
+    message: Message | None = None,
 ) -> str | list[dict[str, Any]]:
-    referenced_message = await _get_referenced_message(event, bot)
-    raw_text = _message_text(event.message, skip_reply=True)
-    has_image = _message_has_image(event.message)
-    referenced_has_image = bool(referenced_message and _message_has_image(referenced_message.message))
+    message = event.message if message is None else message
+    raw_text = _message_text(message, skip_reply=True)
+    has_image = _message_has_image(message)
+    referenced_has_image = bool(
+        referenced_message and _message_has_image(referenced_message.message)
+    )
 
     if not has_image and not referenced_has_image:
         prompts: list[str] = []
         if referenced_message:
-            prompts.append(_build_reference_prompt(referenced_message, _message_text(referenced_message.message)))
+            prompts.append(
+                _build_reference_prompt(
+                    referenced_message, _message_text(referenced_message.message)
+                )
+            )
         prompts.append(_build_user_prompt(user_name, event.user_id, raw_text))
         return "\n".join(prompts)
 
     content: list[dict[str, Any]] = []
     if referenced_message:
-        reference_text = IMAGE_TOKEN_HINT if referenced_has_image else _message_text(referenced_message.message)
+        reference_text = (
+            IMAGE_TOKEN_HINT
+            if referenced_has_image
+            else _message_text(referenced_message.message)
+        )
         await _append_message_content(
             content,
             referenced_message.message,
@@ -232,7 +280,7 @@ async def _build_agent_input(
     user_text = IMAGE_TOKEN_HINT if has_image else raw_text
     await _append_message_content(
         content,
-        event.message,
+        message,
         bot,
         _build_user_prompt(user_name, event.user_id, user_text),
         skip_reply=True,
@@ -241,23 +289,25 @@ async def _build_agent_input(
     return [{"role": "user", "content": content}]
 
 
-async def group_chat(event: GroupMessageEvent, bot: Bot, mem_enabled: bool) -> str:
+async def group_chat(
+    event: GroupMessageEvent, bot: Bot, mem_enabled: bool, turn: TurnContext
+) -> str:
     msg = event.message.__str__()
     print(msg)
-    user_name = event.sender.card if event.sender.card else event.sender.nickname or "Unknown"
-    agent_input = await _build_agent_input(event, bot, user_name)
+    agent_input = turn.input_items
     print(agent_input)
-    response = await run_group_chat(event, bot, agent_input)
+    response = await run_group_chat(event, bot, agent_input, turn)
     print(f"Agent output: {response}")
     return response
 
 
-async def private_chat(event: PrivateMessageEvent, bot: Bot, mem_enabled: bool) -> str:
+async def private_chat(
+    event: PrivateMessageEvent, bot: Bot, mem_enabled: bool, turn: TurnContext
+) -> str:
     msg = event.message.__str__()
     print(msg)
-    user_name = event.sender.nickname or "Unknown"
-    agent_input = await _build_agent_input(event, bot, user_name)
-    response = await run_private_chat(event, bot, agent_input)
+    agent_input = turn.input_items
+    response = await run_private_chat(event, bot, agent_input, turn)
     print(f"Agent output: {response}")
     return response
 

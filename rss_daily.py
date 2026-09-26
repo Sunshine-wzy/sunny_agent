@@ -19,16 +19,14 @@ from typing import ClassVar
 import nonebot_plugin_localstore as store
 from nonebot import get_bots, get_plugin_config
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
-from nonebot.adapters.onebot.v11.exception import (
-    ActionFailed,
-    ApiNotAvailable,
-    NetworkError,
-)
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
 from .chat import acomment_ai_daily
 from .config import Config
+from .context import ContextContent, DeliveryResult, SourceInfo
+from .messaging import message_content
+from .publication import Publication, content_hash
 
 JOB_ID = "sunny_agent_ai_daily_rss"
 STATE_FILE = store.get_data_file("sunny_agent", "ai_daily_rss_state.json")
@@ -664,10 +662,7 @@ def _split_indexed_message_body(message: str, max_chars: int) -> list[str]:
 
 def _add_chunk_indexes(chunks: list[str]) -> list[str]:
     total = len(chunks)
-    return [
-        f"{chunk}\n\n({index}/{total})"
-        for index, chunk in enumerate(chunks, 1)
-    ]
+    return [f"{chunk}\n\n({index}/{total})" for index, chunk in enumerate(chunks, 1)]
 
 
 def split_message(message: str, max_chars: int) -> list[str]:
@@ -700,10 +695,6 @@ def connected_onebot_bots(preferred_bot: Bot | None = None) -> list[Bot]:
     return [preferred_bot, *(bot for bot in bots if bot is not preferred_bot)]
 
 
-def should_retry_send_error(exc: Exception) -> bool:
-    return isinstance(exc, NetworkError)
-
-
 async def wait_random_seconds(min_seconds: float, max_seconds: float) -> None:
     if max_seconds < min_seconds:
         min_seconds, max_seconds = max_seconds, min_seconds
@@ -720,56 +711,41 @@ async def wait_between_messages() -> None:
     )
 
 
-async def wait_before_send_retry() -> None:
-    await wait_random_seconds(
-        plugin_config.sunny_agent_ai_daily_send_retry_delay_min_seconds,
-        plugin_config.sunny_agent_ai_daily_send_retry_delay_max_seconds,
-    )
-
-
 async def send_group_text(
     group_id: int,
     message: str,
     *,
     preferred_bot: Bot | None = None,
-) -> bool:
-    last_error: Exception | None = None
+    publication: Publication | None = None,
+    part_key: str = "text",
+    commentary: bool = False,
+) -> DeliveryResult:
+    if publication is None:
+        publication = Publication(
+            f"rss-message:{content_hash(message)}",
+            "AI 早报",
+            [
+                (
+                    SourceInfo("rss", content_hash(message)),
+                    ContextContent.text(message),
+                ),
+            ],
+        )
+    result = DeliveryResult("", "failed", error="No connected bots")
     for bot in connected_onebot_bots(preferred_bot):
-        for retry_index in range(plugin_config.sunny_agent_ai_daily_send_retry_times + 1):
-            try:
-                await bot.send_group_msg(
-                    group_id=group_id,
-                    message=rss_text_to_message(message),
-                )
-            except ApiNotAvailable as exc:
-                last_error = exc
-                logger.warning(
-                    f"Failed to send AI daily RSS to group {group_id}: {exc}",
-                )
-                break
-            except (ActionFailed, NetworkError) as exc:  # noqa: PERF203
-                last_error = exc
-                if (
-                    retry_index < plugin_config.sunny_agent_ai_daily_send_retry_times
-                    and should_retry_send_error(exc)
-                ):
-                    logger.warning(
-                        "Failed to send AI daily RSS to group "
-                        f"{group_id}, retrying after a random delay: {exc}",
-                    )
-                    await wait_before_send_retry()
-                    continue
-
-                logger.warning(
-                    f"Failed to send AI daily RSS to group {group_id}: {exc}",
-                )
-                break
-            else:
-                return True
-
-    if last_error is None:
-        logger.warning("No OneBot v11 bots are connected for AI daily RSS push.")
-    return False
+        outgoing = rss_text_to_message(message)
+        result = await publication.send(
+            bot,
+            group_id,
+            outgoing,
+            message_content(outgoing),
+            part_key=part_key,
+            commentary=commentary,
+        )
+        if result or result.status in {"unknown", "sending"}:
+            return result
+    logger.warning(f"Failed to send AI daily RSS to group {group_id}: {result.error}")
+    return result
 
 
 def make_forward_nodes(bot: Bot, messages: list[str]) -> Message:
@@ -790,49 +766,32 @@ async def send_group_forward_message_batch(
     messages: list[str],
     *,
     preferred_bot: Bot | None = None,
-) -> bool:
+    publication: Publication | None = None,
+    part_key: str = "forward",
+) -> DeliveryResult:
     if not messages:
-        return True
-
-    last_error: Exception | None = None
+        return DeliveryResult("", "confirmed")
+    visible = message_content(rss_text_to_message("\n\n".join(messages)))
+    if publication is None:
+        publication = Publication(
+            f"rss-forward:{content_hash(str(messages))}",
+            "AI 早报",
+            [
+                (SourceInfo("rss", content_hash(str(messages))), visible),
+            ],
+        )
+    result = DeliveryResult("", "failed", error="No connected bots")
     for bot in connected_onebot_bots(preferred_bot):
         forward_nodes = make_forward_nodes(bot, messages)
-        for retry_index in range(plugin_config.sunny_agent_ai_daily_send_retry_times + 1):
-            try:
-                await bot.call_api(
-                    "send_group_forward_msg",
-                    group_id=group_id,
-                    messages=forward_nodes,
-                )
-            except ApiNotAvailable as exc:
-                last_error = exc
-                logger.warning(
-                    f"Failed to send AI daily RSS forward to group {group_id}: {exc}",
-                )
-                break
-            except (ActionFailed, NetworkError) as exc:  # noqa: PERF203
-                last_error = exc
-                if (
-                    retry_index < plugin_config.sunny_agent_ai_daily_send_retry_times
-                    and should_retry_send_error(exc)
-                ):
-                    logger.warning(
-                        "Failed to send AI daily RSS forward to group "
-                        f"{group_id}, retrying after a random delay: {exc}",
-                    )
-                    await wait_before_send_retry()
-                    continue
-
-                logger.warning(
-                    f"Failed to send AI daily RSS forward to group {group_id}: {exc}",
-                )
-                break
-            else:
-                return True
-
-    if last_error is None:
-        logger.warning("No OneBot v11 bots are connected for AI daily RSS push.")
-    return False
+        result = await publication.send(
+            bot, group_id, forward_nodes, visible, part_key=part_key, forward=True
+        )
+        if result or result.status in {"unknown", "sending"}:
+            return result
+    logger.warning(
+        f"Failed to send AI daily forward to group {group_id}: {result.error}"
+    )
+    return result
 
 
 async def send_group_forward_messages(
@@ -840,6 +799,8 @@ async def send_group_forward_messages(
     messages: list[str],
     *,
     preferred_bot: Bot | None = None,
+    publication: Publication | None = None,
+    part_key: str = "forward",
 ) -> bool:
     forward_messages = split_messages(
         messages,
@@ -858,6 +819,8 @@ async def send_group_forward_messages(
             group_id,
             forward_message_batch,
             preferred_bot=preferred_bot,
+            publication=publication,
+            part_key=f"{part_key}:{index}",
         ):
             return False
 
@@ -870,7 +833,10 @@ async def send_item_to_group(
     *,
     preferred_bot: Bot | None = None,
     wait_before_first: bool = False,
+    publication: Publication | None = None,
 ) -> tuple[bool, bool]:
+    if publication is None:
+        publication = make_rss_publication([item], only_unsent=False)
     sent_any = False
     direct_message = format_item_direct_message(item)
     for index, chunk in enumerate(
@@ -883,7 +849,13 @@ async def send_item_to_group(
             await wait_between_messages()
             wait_before_first = False
 
-        if not await send_group_text(group_id, chunk, preferred_bot=preferred_bot):
+        if not await send_group_text(
+            group_id,
+            chunk,
+            preferred_bot=preferred_bot,
+            publication=publication,
+            part_key=f"{item.item_id}:direct:{index}",
+        ):
             return False, sent_any
         sent_any = True
 
@@ -897,6 +869,8 @@ async def send_item_to_group(
             group_id,
             forward_messages,
             preferred_bot=preferred_bot,
+            publication=publication,
+            part_key=f"{item.item_id}:forward",
         ):
             return False, sent_any
         sent_any = True
@@ -909,6 +883,7 @@ async def send_ai_daily_commentary(
     items: list[FeedItem],
     *,
     preferred_bot: Bot | None = None,
+    publication: Publication | None = None,
 ) -> None:
     # Include the full reports, not just the introductory direct messages.
     content = "\n\n".join(
@@ -916,10 +891,20 @@ async def send_ai_daily_commentary(
         for item in items
     )
     try:
-        commentary = await asyncio.wait_for(
-            acomment_ai_daily(content),
-            timeout=COMMENTARY_TIMEOUT_SECONDS,
+        if publication is None:
+            publication = make_rss_publication(items, only_unsent=False)
+        part_key = f"commentary:{content_hash(content)}"
+        bots = connected_onebot_bots(preferred_bot)
+        commentary = (
+            await publication.saved_commentary(bots[0], group_id, part_key)
+            if bots
+            else None
         )
+        if commentary is None:
+            commentary = await asyncio.wait_for(
+                acomment_ai_daily(content),
+                timeout=COMMENTARY_TIMEOUT_SECONDS,
+            )
         if not commentary:
             logger.warning(f"Empty AI daily commentary for group {group_id}.")
             return
@@ -929,6 +914,9 @@ async def send_ai_daily_commentary(
             group_id,
             commentary,
             preferred_bot=preferred_bot,
+            publication=publication,
+            part_key=part_key,
+            commentary=True,
         )
     except Exception:  # noqa: BLE001
         # Commentary is best effort; keep the successfully sent reports recorded.
@@ -946,6 +934,7 @@ async def send_items_to_group(
     group_key = str(group_id)
     sent_item_ids = state.sent_item_ids.setdefault(group_key, [])
     selected_items = items[: plugin_config.sunny_agent_ai_daily_max_items]
+    publication = make_rss_publication(selected_items, only_unsent=only_unsent)
     if only_unsent:
         selected_items = [
             item for item in selected_items if item.item_id not in sent_item_ids
@@ -960,6 +949,7 @@ async def send_items_to_group(
             item,
             preferred_bot=preferred_bot,
             wait_before_first=bool(commentary_items),
+            publication=publication,
         )
         # An overview is enough to allow commentary if forwarding later fails.
         if sent_any:
@@ -976,9 +966,38 @@ async def send_items_to_group(
             group_id,
             commentary_items,
             preferred_bot=preferred_bot,
+            publication=publication,
         )
 
     return sent_count, state_changed
+
+
+def make_rss_publication(items: list[FeedItem], *, only_unsent: bool) -> Publication:
+    sources = [
+        (
+            SourceInfo(
+                "rss",
+                item.item_id,
+                title=item.title,
+                url=item.link,
+                published=item.published,
+            ),
+            message_content(rss_text_to_message(format_item(item))),
+        )
+        for item in items
+    ]
+    source_key = "rss:" + content_hash(
+        plugin_config.sunny_agent_ai_daily_rss_url
+        + str(sorted(item.item_id for item in items))
+    )
+    publication = Publication(
+        source_key, "AI 早报 · " + ", ".join(item.title for item in items), sources
+    )
+    if only_unsent:
+        publication.batch_id = "scheduled:" + content_hash(
+            str([(source.source_id, content.blocks) for source, content in sources])
+        )
+    return publication
 
 
 async def push_ai_daily_rss() -> None:

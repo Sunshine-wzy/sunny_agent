@@ -4,24 +4,21 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone as datetime_timezone
+from datetime import datetime, timedelta
+from datetime import timezone as datetime_timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import nonebot_plugin_localstore as store
 from nonebot import get_bots, get_plugin_config
 from nonebot.adapters.onebot.v11 import Bot
-from nonebot.adapters.onebot.v11.exception import (
-    ActionFailed,
-    ApiNotAvailable,
-    NetworkError,
-)
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
 from .chat import atranslate_to_chinese
 from .config import Config
-
+from .context import ContextContent, SourceInfo
+from .publication import Publication, content_hash
 
 JOB_ID = "sunny_agent_tibo_monitor"
 STATE_FILE = store.get_data_file("sunny_agent", "tibo_monitor_state.json")
@@ -221,7 +218,10 @@ def parse_posts(payload: object) -> list[TiboPost]:
 
     return sorted(
         posts_by_id.values(),
-        key=lambda post: (post.date_epoch, int(post.tweet_id) if post.tweet_id.isdigit() else 0),
+        key=lambda post: (
+            post.date_epoch,
+            int(post.tweet_id) if post.tweet_id.isdigit() else 0,
+        ),
     )
 
 
@@ -295,8 +295,7 @@ def display_datetime(date_epoch: int) -> str:
         timezone = ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError:
         logger.warning(
-            "Invalid Tibo monitor timezone "
-            f"{timezone_name!r}; falling back to UTC",
+            f"Invalid Tibo monitor timezone {timezone_name!r}; falling back to UTC",
         )
         timezone_name = "UTC"
         timezone = ZoneInfo("UTC")
@@ -339,36 +338,31 @@ async def send_group_message(
     message: str,
     *,
     preferred_bot: Bot | None = None,
+    scheduled: bool = False,
 ) -> bool:
     bots = connected_onebot_bots(preferred_bot)
     if not bots:
         logger.warning("No OneBot v11 bots are connected for Tibo post push.")
         return False
 
+    source_key = f"tibo:{content_hash(message)}"
+    publication = Publication(
+        source_key,
+        "Tibo 推文",
+        [
+            (SourceInfo("tibo", source_key), ContextContent.text(message)),
+        ],
+    )
+    if scheduled:
+        publication.batch_id = source_key
     for bot in bots:
-        for retry_index in range(plugin_config.sunny_agent_tibo_send_retry_times + 1):
-            try:
-                await bot.send_group_msg(group_id=group_id, message=message)
-            except ApiNotAvailable as exc:
-                logger.warning(f"Failed to send Tibo post to group {group_id}: {exc}")
-                break
-            except (ActionFailed, NetworkError) as exc:  # noqa: PERF203
-                if (
-                    isinstance(exc, NetworkError)
-                    and retry_index < plugin_config.sunny_agent_tibo_send_retry_times
-                ):
-                    logger.warning(
-                        f"Failed to send Tibo post to group {group_id}; retrying: {exc}",
-                    )
-                    await asyncio.sleep(
-                        plugin_config.sunny_agent_tibo_send_retry_delay_seconds,
-                    )
-                    continue
-
-                logger.warning(f"Failed to send Tibo post to group {group_id}: {exc}")
-                break
-            else:
-                return True
+        result = await publication.send(
+            bot, group_id, message, ContextContent.text(message), part_key="post"
+        )
+        if result:
+            return True
+        if result.status in {"unknown", "sending"}:
+            return False
     return False
 
 
@@ -390,7 +384,9 @@ async def translate_post(post: TiboPost) -> str:
 
     translation = await atranslate_to_chinese(post.text)
     if not translation:
-        raise ValueError(f"LLM returned an empty translation for Tibo post {post.tweet_id}")
+        raise ValueError(
+            f"LLM returned an empty translation for Tibo post {post.tweet_id}"
+        )
 
     translation_cache[post.tweet_id] = translation
     while len(translation_cache) > MAX_TRANSLATION_CACHE_ITEMS:
@@ -428,7 +424,9 @@ async def push_tibo_updates() -> None:
             try:
                 translation = await translate_post(post)
             except Exception as exc:
-                logger.exception(f"Failed to translate Tibo post {post.tweet_id}: {exc}")
+                logger.exception(
+                    f"Failed to translate Tibo post {post.tweet_id}: {exc}"
+                )
                 continue
 
             message = format_post_message(post, translation)
@@ -436,7 +434,7 @@ async def push_tibo_updates() -> None:
                 current_state = load_state()
                 if not should_notify_group(current_state, group_id, post):
                     continue
-                if await send_group_message(group_id, message):
+                if await send_group_message(group_id, message, scheduled=True):
                     mark_tweet_sent(group_id, post.tweet_id)
 
 

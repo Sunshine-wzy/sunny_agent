@@ -2,21 +2,73 @@ import asyncio
 import json
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from typing import Annotated, Any
 
+import nonebot_plugin_localstore as store
 from agents import RunContextWrapper, function_tool
 from nonebot import get_plugin_config
-import nonebot_plugin_localstore as store
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageSegment, PrivateMessageEvent
+from nonebot.adapters.onebot.v11 import (
+    Bot,
+    GroupMessageEvent,
+    Message,
+    MessageSegment,
+    PrivateMessageEvent,
+)
 
 from .config import Config
+from .context import (
+    Scope,
+    SourceInfo,
+    TurnContext,
+    get_manager,
+)
+from .messaging import (
+    deliver,
+    message_content,
+    outgoing_payload,
+    scope_for_event,
+    send_in_session,
+)
 
 
 @dataclass(slots=True)
 class ChatContext:
     bot: Bot
     event: GroupMessageEvent | PrivateMessageEvent
+    turn: TurnContext | None = None
+
+
+_delivery_tasks: set[asyncio.Task] = set()
+
+
+@function_tool
+async def read_context(
+    ctx: RunContextWrapper[ChatContext],
+    entry_id: Annotated[
+        str, "Context entry ID, or quote:<message_id> for the selected reference."
+    ],
+    offset: int = 0,
+    limit: int = 4000,
+) -> str:
+    """Read a bounded portion of a source in this conversation or the selected quote."""
+    turn = ctx.context.turn
+    if turn is None:
+        return "当前没有聊天会话。"
+    if turn.reference and entry_id == f"quote:{turn.reference.message_id}":
+        text = turn.reference.content.plain_text()
+        start, size = max(0, offset), min(max(1, limit), 8000)
+        return json.dumps(
+            {
+                "content": text[start : start + size],
+                "total_chars": len(text),
+                "offset": start,
+                "has_more": start + size < len(text),
+            },
+            ensure_ascii=False,
+        )
+    return await get_manager().read_context(turn.conversation, entry_id, offset, limit)
 
 
 plugin_config = get_plugin_config(Config)
@@ -101,7 +153,9 @@ async def group_name(ctx: RunContextWrapper[ChatContext]) -> str:
 
 
 @function_tool
-async def group_member_list(ctx: RunContextWrapper[ChatContext]) -> list[dict[str, Any]]:
+async def group_member_list(
+    ctx: RunContextWrapper[ChatContext],
+) -> list[dict[str, Any]]:
     """Gets a short list of members in the current group."""
     event = ctx.context.event
     if not isinstance(event, GroupMessageEvent):
@@ -198,9 +252,44 @@ async def send_private_message(
     user_id: Annotated[int, "The QQ number of the user."],
     message: Annotated[str, "The message to send. CQ code is allowed."],
 ) -> str:
-    """Sends a private chat message to the user."""
-    await ctx.context.bot.send_private_msg(user_id=user_id, message=message)
-    return "The private chat message was sent successfully."
+    """Queue a private message. A queued result does not mean it has been delivered."""
+    manager = get_manager()
+    key = uuid.uuid4().hex
+    scope = Scope(str(ctx.context.bot.self_id), "private", str(user_id))
+    # A fresh inactive destination has no shared mutable history. Persist it without
+    # waiting for that scope's running model; the delivery task acquires its queue.
+    conversation = await manager.call("create", scope, "Sunny 私信", None, key, False)
+    visible = message_content(message)
+    entry_id = await manager.call(
+        "append",
+        conversation,
+        "assistant_publication",
+        visible.blocks,
+        {"kind": "private_delivery"},
+        key,
+    )
+    row = await manager.call(
+        "prepare_delivery",
+        conversation,
+        key,
+        outgoing_payload(message),
+        visible.blocks,
+        [entry_id],
+        None,
+    )
+
+    async def send_queued() -> None:
+        try:
+            await deliver(ctx.context.bot, conversation, row)
+        except Exception:
+            from nonebot.log import logger
+
+            logger.exception("Failed to deliver queued private message")
+
+    task = asyncio.create_task(send_queued())
+    _delivery_tasks.add(task)
+    task.add_done_callback(_delivery_tasks.discard)
+    return f"Private message queued (delivery_id={row['id']}); delivery is not yet confirmed."
 
 
 def _sunny_flayer_source(ctx: RunContextWrapper[ChatContext]) -> dict[str, Any]:
@@ -498,13 +587,35 @@ async def _send_generated_image(
             "error": "Image result has no URL or base64 data.",
         }
 
-    event = ctx.context.event
-    if isinstance(event, GroupMessageEvent):
-        await ctx.context.bot.send_group_msg(group_id=event.group_id, message=segment)
-    else:
-        await ctx.context.bot.send_private_msg(user_id=event.user_id, message=segment)
-
-    return {"sent": True}
+    manager = get_manager()
+    turn = ctx.context.turn
+    conversation = (
+        turn.conversation
+        if turn
+        else await manager.get_active_session(
+            scope_for_event(ctx.context.event, ctx.context.bot),
+        )
+    )
+    key = f"image:{uuid.uuid4().hex}"
+    entry = await manager.append_context(
+        conversation,
+        content=message_content(Message(segment)),
+        source=SourceInfo("generated_image", key, turn_id=turn.turn_id if turn else ""),
+        kind="external",
+        idempotency_key=key,
+    )
+    receipt = await send_in_session(
+        ctx.context.bot,
+        conversation,
+        Message(segment),
+        entries=[entry],
+        idempotency_key=key,
+    )
+    return {
+        "sent": bool(receipt),
+        "delivery_status": receipt.status,
+        "message_id": receipt.message_id,
+    }
 
 
 @function_tool
@@ -561,7 +672,9 @@ async def image_generation(
     if clean_size:
         payload["size"] = clean_size
 
-    endpoint = _image_generation_endpoint(plugin_config.sunny_agent_image_generation_base_url)
+    endpoint = _image_generation_endpoint(
+        plugin_config.sunny_agent_image_generation_base_url
+    )
     try:
         status, body = await asyncio.to_thread(
             _post_image_generation,
@@ -600,7 +713,9 @@ async def image_generation(
 
     result = _decode_image_generation_response(status, body)
     if not result.get("ok"):
-        result.setdefault("request", _image_generation_request_summary(endpoint, payload))
+        result.setdefault(
+            "request", _image_generation_request_summary(endpoint, payload)
+        )
         result.setdefault(
             "message",
             (
@@ -622,11 +737,7 @@ async def image_generation(
                 "error": f"Generated image could not be sent to chat: {exc}",
             }
 
-        safe_image = {
-            key: value
-            for key, value in image.items()
-            if key != "b64_json"
-        }
+        safe_image = {key: value for key, value in image.items() if key != "b64_json"}
         safe_image.update(send_result)
         sent_images.append(safe_image)
 
@@ -635,7 +746,11 @@ async def image_generation(
         "http_status": result["http_status"],
         "created": result.get("created"),
         "images": sent_images,
-        "message": "Generated image(s) were sent to the current chat.",
+        "message": (
+            "Generated image(s) were sent to the current chat."
+            if all(image.get("sent") for image in sent_images)
+            else "Images were generated; check each image's delivery status before claiming they were sent."
+        ),
     }
 
 
@@ -709,7 +824,9 @@ async def send_minecraft_instruction(
 
 
 @function_tool
-async def enable_active_group_message_receiving(ctx: RunContextWrapper[ChatContext]) -> str:
+async def enable_active_group_message_receiving(
+    ctx: RunContextWrapper[ChatContext],
+) -> str:
     """Enables active receiving of group chat messages in the current group.
 
     When enabled, Sunny can receive messages from this group even when Sunny is not
@@ -724,7 +841,9 @@ async def enable_active_group_message_receiving(ctx: RunContextWrapper[ChatConte
 
 
 @function_tool
-async def disable_active_group_message_receiving(ctx: RunContextWrapper[ChatContext]) -> str:
+async def disable_active_group_message_receiving(
+    ctx: RunContextWrapper[ChatContext],
+) -> str:
     """Disables active receiving of group chat messages in the current group.
 
     When disabled, Sunny only receives group messages when mentioned or replied to.

@@ -15,7 +15,8 @@ from . import tibo_monitor as tibo_monitor
 __plugin_meta__ = PluginMetadata(
     name="sunny_agent",
     description="Sunny 群聊 Agent、AI 早报与 Tibo 推文监控",
-    usage="/rss open|close|today；/tibo open|close|latest",
+    usage="/new（/clear）；引用消息切换会话；引用 + /quote 问题仅引用内容；"
+    "/session current|list|use；/rss open|close|today；/tibo open|close|latest",
     config=Config,
 )
 
