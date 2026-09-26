@@ -927,7 +927,7 @@ async def send_ai_daily_commentary(
         await wait_between_messages()
         await send_group_text(
             group_id,
-            f"【Sunny 的早报看法】\n{commentary}",
+            commentary,
             preferred_bot=preferred_bot,
         )
     except Exception:  # noqa: BLE001

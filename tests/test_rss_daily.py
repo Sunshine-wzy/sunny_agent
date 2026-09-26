@@ -52,9 +52,9 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
         self.bot.send_group_msg = AsyncMock()
         self.bot.call_api = AsyncMock()
         self.commentary = (
-            "1、模型开放：我关心部署成本。\n"
-            "2、编程工具：我期待实测。\n"
-            "3、评测：我更看重泛化。"
+            "模型开放挺好，不过部署成本要是太高，还是很难用起来。\n\n"
+            "这个编程工具倒是想试试，看看改老项目时能不能少踩点坑。\n\n"
+            "评测分数看着不错，就是不知道换一批题还能不能稳住。"
         )
         self.generate = AsyncMock(return_value=self.commentary)
         self.addCleanup(patch.stopall)
@@ -112,7 +112,7 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
         last_message = self.bot.send_group_msg.call_args.kwargs["message"]
         self.assertEqual(
             last_message.extract_plain_text(),
-            f"【Sunny 的早报看法】\n{self.commentary}",
+            self.commentary,
         )
         self.generate.assert_awaited_once()
         prompt = self.generate.call_args.args[0]
@@ -203,7 +203,7 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.bot.send_group_msg.call_args.kwargs["message"].extract_plain_text(),
-            f"【Sunny 的早报看法】\n{self.commentary}",
+            self.commentary,
         )
 
     async def test_failed_overview_does_not_generate_commentary(self) -> None:
@@ -244,7 +244,7 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("早报 new", prompt)
         self.assertEqual(
             self.bot.send_group_msg.call_args.kwargs["message"].extract_plain_text(),
-            f"【Sunny 的早报看法】\n{self.commentary}",
+            self.commentary,
         )
 
     async def test_empty_output_or_model_error_keeps_report_success(self) -> None:
