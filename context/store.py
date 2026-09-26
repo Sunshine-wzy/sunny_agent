@@ -186,9 +186,10 @@ class ContextStore:
 
     def find(self, scope: Scope, short_id: str) -> ConversationRef | None:
         with self.lock:
+            identifier = short_id.strip().lstrip("#")
             row = self.db.execute(
-                "SELECT * FROM conversations WHERE scope=? AND short_id=?",
-                (scope.key, short_id.lstrip("#").upper()),
+                "SELECT * FROM conversations WHERE scope=? AND (short_id=? OR id=?)",
+                (scope.key, identifier.upper(), identifier.lower()),
             ).fetchone()
             return self._conversation(row) if row else None
 
@@ -201,6 +202,36 @@ class ContextStore:
                     (scope.key, limit),
                 )
             ]
+
+    def session_catalog(self, scope: Scope, offset: int, limit: int) -> dict[str, Any]:
+        with self.lock:
+            total = self.db.execute(
+                "SELECT COUNT(*) FROM conversations WHERE scope=?", (scope.key,)
+            ).fetchone()[0]
+            active = self.active(scope)
+            rows = self.db.execute(
+                "SELECT id,short_id,title,created_at FROM conversations "
+                "WHERE scope=? ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                (scope.key, limit, offset),
+            ).fetchall()
+            next_offset = offset + len(rows)
+            return {
+                "sessions": [
+                    {
+                        "session_id": row["short_id"],
+                        "title": row["title"][:200],
+                        "created_at": row["created_at"],
+                        "is_current": bool(
+                            active and row["id"] == active.conversation_id
+                        ),
+                    }
+                    for row in rows
+                ],
+                "offset": offset,
+                "total": total,
+                "has_more": next_offset < total,
+                "next_offset": next_offset if next_offset < total else None,
+            }
 
     def title_entries(self, conversation: ConversationRef) -> list[dict[str, Any]]:
         """A small snapshot for naming; exclude failed turns and control messages."""

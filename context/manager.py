@@ -26,6 +26,7 @@ from .models import (
 from .naming import build_title_input, normalize_title
 from .session import ConversationSession
 from .store import ContextStore
+from .transcript import transcript_page
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,39 @@ class ConversationManager:
 
     async def find_session(self, scope: Scope, short_id: str) -> ConversationRef | None:
         return await self.call("find", scope, short_id)
+
+    async def list_session_catalog(
+        self, scope: Scope, offset: int = 0, limit: int = 10
+    ) -> dict[str, Any]:
+        return await self.call(
+            "session_catalog",
+            scope,
+            max(0, min(offset, 2**63 - 1)),
+            max(1, min(limit, 50)),
+        )
+
+    async def read_session(
+        self,
+        scope: Scope,
+        session_id: str,
+        offset: int = 0,
+        limit: int = 4000,
+        *,
+        exclude_turn: str = "",
+    ) -> dict[str, Any]:
+        conversation = await self.find_session(scope, session_id)
+        if conversation is None:
+            return {
+                "error": "找不到本聊天中的会话。请先调用 list_sessions 查询会话编号。"
+            }
+        entries = await self.call("entries", conversation, exclude_turn)
+        return {
+            "session_id": conversation.short_id,
+            "title": conversation.title[:200],
+            **await asyncio.to_thread(
+                transcript_page, entries, max(0, offset), max(1, min(limit, 8000))
+            ),
+        }
 
     async def append_context(
         self,

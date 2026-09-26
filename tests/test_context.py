@@ -890,6 +890,253 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.manager.call("active", private_scope))
         self.assertIsNone(await self.manager.lookup_message(self.scope, 1001))
 
+    async def invoke_history_tool(self, name, *, event=None, turn=None, **arguments):
+        from agents.tool_context import ToolContext
+
+        tool = importlib.import_module("context_test_plugin.tool")
+        encoded = json.dumps(arguments)
+        wrapper = ToolContext(
+            tool.ChatContext(
+                bot=self.bot, event=event or self.event(999, "查阅会话"), turn=turn
+            ),
+            tool_name=name,
+            tool_call_id="history-test",
+            tool_arguments=encoded,
+        )
+        return json.loads(await getattr(tool, name).on_invoke_tool(wrapper, encoded))
+
+    async def test_history_tools_do_not_create_empty_chat_or_expose_scope_parameters(
+        self,
+    ):
+        listing = await self.invoke_history_tool("list_sessions")
+        self.assertEqual(listing["sessions"], [])
+        self.assertFalse(listing["has_more"])
+        self.assertEqual(listing["total"], 0)
+        missing = await self.invoke_history_tool("read_session", session_id="unknown")
+        self.assertIn("error", missing)
+        self.assertIsNone(await self.manager.call("active", self.scope))
+        self.assertEqual(await self.manager.list_sessions(self.scope), [])
+        for agent in (self.graph.group_agent, self.graph.private_agent):
+            by_name = {t.name: t for t in agent.tools}
+            self.assertIn("list_sessions", by_name)
+            self.assertIn("read_session", by_name)
+            self.assertEqual(
+                set(by_name["list_sessions"].params_json_schema["properties"]),
+                {"offset", "limit"},
+            )
+            self.assertEqual(
+                set(by_name["read_session"].params_json_schema["properties"]),
+                {"session_id", "offset", "limit"},
+            )
+        self.bot.send_group_msg.assert_not_awaited()
+
+    async def test_session_tool_listing_is_paginated_bounded_and_read_only(self):
+        sessions = [
+            await self.manager.create_session(self.scope, title=f"话题 {index}")
+            for index in range(55)
+        ]
+        await self.manager.create_session(
+            self.context.Scope("42", "group", "456"), title="其他群"
+        )
+        changes = self.manager.store.db.total_changes
+        first = await self.invoke_history_tool("list_sessions", offset=-1, limit=999)
+        self.assertEqual(first["total"], 55)
+        self.assertEqual(len(first["sessions"]), 50)
+        self.assertEqual(first["sessions"][0]["session_id"], sessions[-1].short_id)
+        self.assertEqual(
+            [item["is_current"] for item in first["sessions"]], [True] + [False] * 49
+        )
+        self.assertTrue(first["sessions"][0]["created_at"])
+        second = await self.invoke_history_tool(
+            "list_sessions", offset=first["next_offset"]
+        )
+        self.assertEqual(
+            [item["session_id"] for item in second["sessions"]],
+            [s.short_id for s in reversed(sessions[:5])],
+        )
+        self.assertFalse(second["has_more"])
+        self.assertIsNone(second["next_offset"])
+        past_end = await self.invoke_history_tool("list_sessions", offset=100)
+        self.assertEqual(past_end["sessions"], [])
+        self.assertEqual(self.manager.store.db.total_changes, changes)
+
+    async def test_read_session_tool_reads_messages_sources_and_does_not_switch(self):
+        await self.say(1, "先前关于 SQLite 的讨论")
+        old = await self.manager.get_active_session(self.scope)
+        await self.manager.append_context(
+            old,
+            content=self.context.ContextContent.text("SQLite 资料正文"),
+            source=self.context.SourceInfo("article", "sqlite", title="数据库说明"),
+            idempotency_key="source",
+        )
+        await self.manager.append_context(
+            old,
+            content=self.context.ContextContent.text("Sunny 的补充说明"),
+            kind="assistant_publication",
+            source=self.context.SourceInfo("note", "note"),
+            idempotency_key="note",
+        )
+        await self.say(2, "/new")
+        current = await self.manager.get_active_session(self.scope)
+        changes = self.manager.store.db.total_changes
+        result = await self.invoke_history_tool(
+            "read_session", session_id=f" #{old.short_id.lower()} ", limit=8000
+        )
+        for text in (
+            "先前关于 SQLite",
+            "模型回复",
+            "SQLite 资料正文",
+            "数据库说明",
+            "Sunny 的补充说明",
+            "尚未确认送达",
+        ):
+            self.assertIn(text, result["content"])
+        by_id = await self.invoke_history_tool(
+            "read_session", session_id=old.conversation_id
+        )
+        self.assertEqual(by_id["content"], result["content"])
+        self.assertEqual(await self.manager.get_active_session(self.scope), current)
+        self.assertEqual(self.manager.store.db.total_changes, changes)
+        empty = await self.invoke_history_tool(
+            "read_session", session_id=current.short_id
+        )
+        self.assertEqual(empty["content"], "")
+        self.assertEqual(empty["total_chars"], 0)
+
+    async def test_session_reader_scope_is_derived_from_event_and_cannot_leak_other_chats(
+        self,
+    ):
+        for scope in (
+            self.context.Scope("42", "group", "456"),
+            self.context.Scope("43", "group", "123"),
+            self.context.Scope("42", "private", "100"),
+            self.context.Scope("42", "private", "200"),
+        ):
+            hidden = await self.manager.create_session(scope, title="隔离标题")
+            await self.manager.append_context(
+                hidden,
+                content=self.context.ContextContent.text("隔离正文"),
+                source=self.context.SourceInfo("test", "isolated"),
+                idempotency_key="isolated",
+            )
+            for identifier in (hidden.short_id, hidden.conversation_id):
+                result = await self.invoke_history_tool(
+                    "read_session", session_id=identifier
+                )
+                self.assertEqual(set(result), {"error"})
+            if scope.chat_type == "private" and scope.peer_id == "100":
+                own_private = hidden
+        result = await self.invoke_history_tool(
+            "read_session",
+            event=self.event(2, "读取", private=True),
+            session_id=own_private.short_id,
+        )
+        self.assertIn("隔离正文", result["content"])
+        listing = await self.invoke_history_tool("list_sessions")
+        self.assertEqual(listing["sessions"], [])
+        self.assertIsNone(await self.manager.call("active", self.scope))
+
+    async def test_session_reader_pages_full_text_without_raw_tools_reasoning_or_media(
+        self,
+    ):
+        async def rich_run(event, bot, input_items, turn):
+            await turn.session.add_items(
+                input_items
+                + [
+                    {"type": "reasoning", "summary": "SECRET_REASONING"},
+                    {
+                        "type": "function_call",
+                        "name": "read_session",
+                        "call_id": "c",
+                        "arguments": "SECRET_ARGUMENTS",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "c",
+                        "output": "SECRET_TOOL_RESULT",
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "最终回复"}],
+                    },
+                ]
+            )
+            return "最终回复"
+
+        with patch.object(self.controller.chat, "run_group_chat", side_effect=rich_run):
+            await self.say(1, "可见问题")
+        session = await self.manager.get_active_session(self.scope)
+        await self.manager.append_context(
+            session,
+            content=self.context.ContextContent(
+                [
+                    {"type": "input_text", "text": "长资料" * 3500 + "资料结束"},
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,SECRET_IMAGE",
+                    },
+                    {"type": "input_file", "file_data": "SECRET_FILE"},
+                ]
+            ),
+            source=self.context.SourceInfo("test", "long"),
+            idempotency_key="long",
+        )
+        offset, parts = 0, []
+        while True:
+            page = await self.invoke_history_tool(
+                "read_session", session_id=session.short_id, offset=offset, limit=1000
+            )
+            self.assertLessEqual(len(page["content"]), 1000)
+            parts.append(page["content"])
+            if not page["has_more"]:
+                break
+            self.assertGreater(page["next_offset"], offset)
+            offset = page["next_offset"]
+        joined = "".join(parts)
+        self.assertEqual(len(joined), page["total_chars"])
+        self.assertIn("可见问题", joined)
+        self.assertIn("最终回复", joined)
+        self.assertIn("资料结束", joined)
+        self.assertIn("[图片]", joined)
+        self.assertIn("[附件]", joined)
+        self.assertNotIn("SECRET_", joined)
+        clamped = await self.invoke_history_tool(
+            "read_session", session_id=session.short_id, offset=-50, limit=99999
+        )
+        self.assertEqual(clamped["content"], joined[:8000])
+        beyond = await self.invoke_history_tool(
+            "read_session", session_id=session.short_id, offset=page["total_chars"] + 1
+        )
+        self.assertEqual(beyond["content"], "")
+        self.assertFalse(beyond["has_more"])
+
+    async def test_session_reader_preserves_failure_delivery_status_and_excludes_active_turn(
+        self,
+    ):
+        with patch.object(
+            self.controller.chat, "run_group_chat", side_effect=RuntimeError("failed")
+        ):
+            await self.say(1, "失败请求")
+        self.bot.send_group_msg.side_effect = NetworkError("lost receipt")
+        await self.say(2, "发送状态未知")
+        session = await self.manager.get_active_session(self.scope)
+        turn_id = await self.manager.begin_turn(
+            session,
+            "running",
+            self.context.ContextContent.text("当前尚未完成"),
+            "用户",
+            "100",
+        )
+        turn = await self.manager.prepare_model_turn(session, turn_id, "当前尚未完成")
+        result = await self.invoke_history_tool(
+            "read_session", session_id=session.short_id, turn=turn
+        )
+        self.assertIn("失败请求", result["content"])
+        self.assertIn("失败或中断", result["content"])
+        self.assertIn("未确认送达：unknown", result["content"])
+        self.assertNotIn("当前尚未完成", result["content"])
+
 
 if __name__ == "__main__":
     unittest.main()
