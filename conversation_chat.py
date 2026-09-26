@@ -315,3 +315,4 @@ async def handle_message(event: MessageEvent, bot: Bot) -> None:
             turn.entry_ids[0],
         )
         await deliver(bot, conversation, delivery)
+        manager.schedule_title(conversation)

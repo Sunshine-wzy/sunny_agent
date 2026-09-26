@@ -7,6 +7,9 @@ class Config(BaseModel):
     sunny_agent_context_entry_max_chars: int = Field(default=12000, ge=500)
     sunny_agent_context_turn_timeout_seconds: float = Field(default=300.0, gt=0)
     sunny_agent_context_send_timeout_seconds: float = Field(default=60.0, gt=0)
+    sunny_agent_context_auto_title_enabled: bool = True
+    sunny_agent_context_title_model: str = ""
+    sunny_agent_context_title_timeout_seconds: float = Field(default=30.0, gt=0)
     sunny_agent_ai_daily_enabled: bool = False
     sunny_agent_ai_daily_rss_url: str = "https://daily.juya.uk/rss.xml"
     sunny_agent_ai_daily_hour: int = Field(default=9, ge=0, le=23)

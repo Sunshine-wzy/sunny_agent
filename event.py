@@ -7,7 +7,7 @@ from nonebot.adapters.onebot.v11 import (
 )
 
 from . import tool
-from .context import get_manager
+from .context import get_manager, stop_title_tasks
 from .conversation_chat import handle_message, new_session_from_poke, reply_message_id
 from .messaging import recover_pending, scope_for_event
 
@@ -60,3 +60,8 @@ async def handle_poke_new_group(event: PokeNotifyEvent, bot: Bot) -> None:
 async def recover_context_deliveries(bot: Bot) -> None:
     if isinstance(bot, Bot):
         await recover_pending(bot)
+
+
+@get_driver().on_shutdown
+async def stop_context_title_tasks() -> None:
+    await stop_title_tasks()

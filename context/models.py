@@ -30,8 +30,8 @@ class Scope:
 class ConversationRef:
     scope: Scope
     conversation_id: str
-    short_id: str
-    title: str
+    short_id: str = field(compare=False)
+    title: str = field(compare=False)
 
 
 @dataclass(frozen=True, slots=True)

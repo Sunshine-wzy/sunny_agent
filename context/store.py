@@ -25,7 +25,7 @@ class ContextStore:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA journal_mode=WAL")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             raise ContextError(f"Unsupported context database version: {version}")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS conversations (
@@ -71,9 +71,19 @@ class ContextStore:
                 receipt TEXT, error TEXT NOT NULL DEFAULT '',
                 UNIQUE(conversation_id, idempotency_key)
             );
-            PRAGMA user_version=1;
         """)
         with self.db:
+            if version < 2:
+                self.db.execute("BEGIN")
+                self.db.execute(
+                    "ALTER TABLE conversations ADD COLUMN title_status TEXT NOT NULL "
+                    "DEFAULT 'pending'"
+                )
+                self.db.execute(
+                    "UPDATE conversations SET title_status='fixed' "
+                    "WHERE title != '新会话' OR source_key IS NOT NULL"
+                )
+                self.db.execute("PRAGMA user_version=2")
             self.db.execute(
                 "UPDATE turns SET status='interrupted' WHERE status='running'"
             )
@@ -108,6 +118,7 @@ class ContextStore:
         source_key: str | None,
         key: str,
         activate: bool,
+        auto_title: bool = True,
     ) -> ConversationRef:
         request = encode([title, source_key, activate])
         with self.lock, self.db:
@@ -136,7 +147,7 @@ class ContextStore:
             conversation = ConversationRef(scope, uuid.uuid4().hex, short_id, title)
             self.db.execute(
                 "INSERT INTO conversations(id,scope,short_id,title,source_key,"
-                "creation_key,request) VALUES(?,?,?,?,?,?,?)",
+                "creation_key,request,title_status) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     conversation.conversation_id,
                     scope.key,
@@ -145,6 +156,7 @@ class ContextStore:
                     source_key,
                     key,
                     request,
+                    "pending" if auto_title else "fixed",
                 ),
             )
             if activate:
@@ -189,6 +201,43 @@ class ContextStore:
                     (scope.key, limit),
                 )
             ]
+
+    def title_entries(self, conversation: ConversationRef) -> list[dict[str, Any]]:
+        """A small snapshot for naming; exclude failed turns and control messages."""
+        with self.lock:
+            self._validate(conversation)
+            status = self.db.execute(
+                "SELECT title_status FROM conversations WHERE id=?",
+                (conversation.conversation_id,),
+            ).fetchone()[0]
+            if status != "pending":
+                return []
+            turns = self.db.execute(
+                "SELECT e.kind,e.content FROM context_entries e JOIN turns t "
+                "ON e.turn_id=t.id WHERE e.conversation_id=? AND e.kind='turn' "
+                "AND t.status='complete' ORDER BY e.seq LIMIT 3",
+                (conversation.conversation_id,),
+            ).fetchall()
+            if not turns:
+                return []
+            sources = self.db.execute(
+                "SELECT kind,content FROM context_entries WHERE conversation_id=? "
+                "AND kind='external' ORDER BY seq LIMIT 2",
+                (conversation.conversation_id,),
+            ).fetchall()
+            return [
+                {"kind": row["kind"], "content": json.loads(row["content"])}
+                for row in [*turns, *sources]
+            ]
+
+    def set_generated_title(self, conversation: ConversationRef, title: str) -> None:
+        with self.lock, self.db:
+            self._validate(conversation)
+            self.db.execute(
+                "UPDATE conversations SET title=?,title_status='generated' "
+                "WHERE id=? AND scope=? AND title_status='pending'",
+                (title, conversation.conversation_id, conversation.scope.key),
+            )
 
     def _append(
         self,

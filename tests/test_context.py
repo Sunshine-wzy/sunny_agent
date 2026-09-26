@@ -1,10 +1,12 @@
 import asyncio
 import importlib
 import json
+import sqlite3
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -57,6 +59,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.db_path = Path(directory.name) / "context.sqlite3"
         self.manager = self.context.ConversationManager(self.db_path)
         self.addCleanup(self.manager.store.close)
+        self.addAsyncCleanup(self.manager.cancel_title_tasks)
         self.patch = patch.object(self.context, "_manager", self.manager)
         self.patch.start()
         self.addCleanup(self.patch.stop)
@@ -124,6 +127,356 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
     async def say(self, message_id, text, **kwargs):
         await self.controller.handle_message(
             self.event(message_id, text, **kwargs), self.bot
+        )
+
+    async def wait_for_titles(self):
+        await asyncio.wait_for(asyncio.gather(*self.manager._title_tasks.values()), 2)
+
+    async def test_title_generated_once_and_shown_in_commands_after_restart(self):
+        generator = AsyncMock(return_value="  标题：“SQLite 会话持久化”  ")
+        self.manager.title_generator = generator
+        await self.say(1, "/new")
+        original = await self.manager.get_active_session(self.scope)
+        await self.say(2, "/session current")
+        generator.assert_not_awaited()
+        await self.say(3, "如何用 SQLite 持久化会话？")
+        await self.wait_for_titles()
+        current = await self.manager.get_active_session(self.scope)
+        self.assertEqual(current.title, "SQLite 会话持久化")
+        self.assertEqual(current, original)
+        self.assertEqual(hash(current), hash(original))
+        naming_input = generator.await_args.args[0]
+        self.assertIn("如何用 SQLite 持久化会话", naming_input)
+        self.assertIn("模型回复", naming_input)
+        self.assertNotIn("/new", naming_input)
+        self.assertNotIn("user-100", naming_input)
+        self.assertNotIn("qq=", naming_input)
+        entries = await self.manager.call("entries", current)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(len(entries[0]["content"]), 2)
+        await self.say(4, "继续讨论")
+        await self.wait_for_titles()
+        await self.say(5, "/session list")
+        self.assertIn(
+            f"→ #{current.short_id} SQLite 会话持久化", str(self.sent[-1][1]["message"])
+        )
+        await self.say(6, "/session current")
+        self.assertIn(current.title, str(self.sent[-1][1]["message"]))
+        restored = self.context.ConversationManager(
+            self.db_path, title_generator=generator
+        )
+        self.addCleanup(restored.store.close)
+        self.addAsyncCleanup(restored.cancel_title_tasks)
+        self.assertEqual(
+            (await restored.get_active_session(self.scope)).title, current.title
+        )
+        restored.schedule_title(original)
+        await asyncio.gather(*restored._title_tasks.values())
+        generator.assert_awaited_once()
+
+    async def test_slow_naming_does_not_block_chat_or_change_active_session(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def name(text):
+            started.set()
+            await release.wait()
+            return "旧会话主题"
+
+        self.manager.title_generator = AsyncMock(side_effect=name)
+        await asyncio.wait_for(self.say(1, "原来的话题"), 2)
+        await asyncio.wait_for(started.wait(), 2)
+        old = await self.manager.get_active_session(self.scope)
+        self.manager.schedule_title(old)
+        await asyncio.wait_for(self.say(2, "继续原来的话题"), 2)
+        await asyncio.wait_for(self.say(3, "/new"), 2)
+        active = await self.manager.get_active_session(self.scope)
+        release.set()
+        await self.wait_for_titles()
+        self.manager.title_generator.assert_awaited_once()
+        self.assertEqual(await self.manager.get_active_session(self.scope), active)
+        self.assertEqual(
+            (await self.manager.find_session(self.scope, old.short_id)).title,
+            "旧会话主题",
+        )
+        binding = await self.manager.lookup_message(self.scope, 1)
+        self.assertEqual(binding.conversation.title, "旧会话主题")
+        await self.say(4, "", reply=1)
+        self.assertEqual(await self.manager.get_active_session(self.scope), old)
+
+    async def test_naming_failures_preserve_reply_and_retry_after_next_success(self):
+        for index, failure in enumerate(
+            [RuntimeError("offline"), "", "[CQ:at,qq=all]"]
+        ):
+            with self.subTest(failure=failure):
+                generator = AsyncMock(side_effect=[failure, "恢复后的会话标题"])
+                self.manager.title_generator = generator
+                await self.say(index * 10 + 1, "/new")
+                with self.assertLogs(
+                    "context_test_plugin.context.manager", level="WARNING"
+                ):
+                    await self.say(index * 10 + 2, "讨论上下文管理")
+                    await self.wait_for_titles()
+                self.assertIn("模型回复", str(self.sent[-1][1]["message"]))
+                self.assertEqual(
+                    (await self.manager.get_active_session(self.scope)).title, "新会话"
+                )
+                await self.say(index * 10 + 3, "继续")
+                await self.wait_for_titles()
+                self.assertEqual(
+                    (await self.manager.get_active_session(self.scope)).title,
+                    "恢复后的会话标题",
+                )
+                self.assertEqual(generator.await_count, 2)
+
+    async def test_naming_timeout_cancels_request_and_can_retry(self):
+        cancelled = asyncio.Event()
+
+        async def slow(text):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        self.manager.title_generator = slow
+        self.manager.title_timeout_seconds = 0.02
+        with self.assertLogs("context_test_plugin.context.manager", level="WARNING"):
+            await self.say(1, "讨论异步超时")
+            await self.wait_for_titles()
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(
+            (await self.manager.get_active_session(self.scope)).title, "新会话"
+        )
+        self.manager.title_generator = AsyncMock(return_value="异步超时处理")
+        await self.say(2, "继续")
+        await self.wait_for_titles()
+        self.assertEqual(
+            (await self.manager.get_active_session(self.scope)).title, "异步超时处理"
+        )
+
+    async def test_empty_failed_and_explicitly_named_conversations_are_not_renamed(
+        self,
+    ):
+        generator = AsyncMock(return_value="不应使用")
+        self.manager.title_generator = generator
+        empty = await self.manager.get_active_session(self.scope)
+        self.manager.schedule_title(empty)
+        await self.wait_for_titles()
+        with patch.object(
+            self.controller.chat, "run_group_chat", side_effect=RuntimeError("failed")
+        ):
+            await self.say(1, "失败的请求")
+        self.manager.schedule_title(empty)
+        await self.wait_for_titles()
+        for index, title in enumerate(["AI 早报", "新会话"]):
+            await self.manager.create_session(self.scope, title=title)
+            await self.say(index + 2, "补充讨论")
+            await self.wait_for_titles()
+            self.assertEqual(
+                (await self.manager.get_active_session(self.scope)).title, title
+            )
+        generator.assert_not_awaited()
+
+    async def test_title_input_is_bounded_and_excludes_tools_reasoning_and_media(self):
+        naming = importlib.import_module("context_test_plugin.context.naming")
+        entries = [
+            {
+                "kind": "turn",
+                "content": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "问题" * 4000},
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,secret",
+                            },
+                            {"type": "input_file", "file_data": "secret file"},
+                        ],
+                    },
+                    {"type": "function_call", "name": "x", "arguments": "secret call"},
+                    {"type": "function_call_output", "output": "secret result"},
+                    {"type": "reasoning", "summary": "secret reasoning"},
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "回复摘要"},
+                        ],
+                    },
+                ],
+            },
+            {
+                "kind": "external",
+                "content": [{"type": "input_text", "text": "项目资料"}],
+            },
+        ]
+        value = naming.build_title_input(entries * 10)
+        self.assertLessEqual(len(value), naming.TITLE_INPUT_MAX_CHARS)
+        self.assertNotIn("secret", value)
+        self.assertIn("回复摘要", value)
+        self.assertIn("项目资料", value)
+        self.assertEqual(
+            naming.normalize_title("“标题\n换行” [CQ:at,qq=all]\u202e"), "标题 换行"
+        )
+        self.assertEqual(
+            len(naming.normalize_title("长" * 100)), naming.TITLE_MAX_CHARS
+        )
+
+    async def test_renamed_refs_keep_entry_associations_and_scope_isolation(self):
+        from dataclasses import replace
+
+        original = await self.manager.get_active_session(self.scope)
+        entry = await self.manager.append_context(
+            original,
+            content=self.context.ContextContent.text("项目资料"),
+            source=self.context.SourceInfo("test", "title"),
+            idempotency_key="title",
+        )
+        self.manager.title_generator = AsyncMock(return_value="项目讨论")
+        await self.say(1, "讨论项目")
+        await self.wait_for_titles()
+        fresh = await self.manager.get_active_session(self.scope)
+        self.assertIn("项目资料", self.manager.title_generator.await_args.args[0])
+        await self.manager.bind_message(
+            fresh,
+            message_id="manual",
+            visible_content=self.context.ContextContent.text("入口"),
+            entries=[entry],
+        )
+        delivery = await self.messaging.send_in_session(
+            self.bot, fresh, "入口", idempotency_key="entry", entries=[entry]
+        )
+        self.assertTrue(delivery)
+        forged = replace(fresh, scope=self.context.Scope("42", "group", "999"))
+        with self.assertRaises(self.context.ContextError):
+            await self.manager.call("title_entries", forged)
+        with self.assertRaises(self.context.ContextError):
+            await self.manager.call("set_generated_title", forged, "wrong")
+
+    async def test_v1_migration_preserves_titles_history_and_creation_idempotency(self):
+        path = self.db_path.with_name("v1.sqlite3")
+        legacy = self.context.ConversationManager(path)
+        original = await legacy.create_session(self.scope, idempotency_key="original")
+        fixed = await legacy.create_session(self.scope, title="早报", activate=False)
+        entry = await legacy.append_context(
+            original,
+            content=self.context.ContextContent.text("历史资料"),
+            source=self.context.SourceInfo("test", "legacy"),
+            idempotency_key="legacy",
+        )
+        legacy.store.close()
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute("ALTER TABLE conversations DROP COLUMN title_status")
+            db.execute("PRAGMA user_version=1")
+        restored = self.context.ConversationManager(path)
+        self.addCleanup(restored.store.close)
+        self.assertEqual(await restored.get_active_session(self.scope), original)
+        self.assertIn(
+            "历史资料", await restored.read_context(original, entry.entry_id, 0, 1000)
+        )
+        await restored.call("set_generated_title", original, "迁移后的标题")
+        await restored.call("set_generated_title", fixed, "不可覆盖")
+        self.assertEqual(
+            (await restored.find_session(self.scope, fixed.short_id)).title, "早报"
+        )
+        retried = await restored.create_session(self.scope, idempotency_key="original")
+        self.assertEqual(retried.title, "迁移后的标题")
+        self.assertEqual(
+            restored.store.db.execute("PRAGMA user_version").fetchone()[0], 2
+        )
+
+    async def test_title_runner_uses_configured_model_without_tools_or_session(self):
+        config = types.SimpleNamespace(
+            sunny_agent_context_title_model="configured-title-model"
+        )
+        with (
+            patch.object(self.graph, "get_plugin_config", return_value=config),
+            patch.object(
+                self.graph.Runner,
+                "run",
+                new_callable=AsyncMock,
+                return_value=types.SimpleNamespace(final_output="生成标题"),
+            ) as run,
+        ):
+            self.assertEqual(
+                await self.graph.generate_conversation_title("对话内容"), "生成标题"
+            )
+        args, kwargs = run.await_args
+        self.assertEqual(args[1], "对话内容")
+        self.assertEqual(args[0].tools, [])
+        self.assertNotIn("session", kwargs)
+        self.assertEqual(kwargs["max_turns"], 1)
+        self.assertEqual(kwargs["run_config"].model, "configured-title-model")
+        self.assertIs(kwargs["run_config"].model_provider, self.graph.model_provider)
+
+    async def test_title_factory_wires_default_model_and_respects_disabled_setting(
+        self,
+    ):
+        import nonebot_plugin_localstore as store
+
+        config_type = importlib.import_module("context_test_plugin.config").Config
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                config = config_type(sunny_agent_context_auto_title_enabled=enabled)
+                with (
+                    patch.object(self.context, "_manager", None),
+                    patch.object(
+                        store,
+                        "get_data_file",
+                        return_value=self.db_path.with_name(
+                            f"factory-{enabled}.sqlite3"
+                        ),
+                    ),
+                    patch.object(nonebot, "get_plugin_config", return_value=config),
+                    patch.object(self.graph, "get_plugin_config", return_value=config),
+                    patch.object(
+                        self.graph.Runner,
+                        "run",
+                        new_callable=AsyncMock,
+                        return_value=types.SimpleNamespace(final_output="私聊主题"),
+                    ) as run,
+                ):
+                    manager = self.context.get_manager()
+                    self.addCleanup(manager.store.close)
+                    self.addAsyncCleanup(manager.cancel_title_tasks)
+                    await self.say(1, "私聊的问题", private=True)
+                    await asyncio.gather(*manager._title_tasks.values())
+                    private_scope = self.context.Scope("42", "private", "100")
+                    current = await manager.get_active_session(private_scope)
+                    self.assertEqual(current.title, "私聊主题" if enabled else "新会话")
+                    if enabled:
+                        run.assert_awaited_once()
+                        self.assertEqual(
+                            run.await_args.kwargs["run_config"].model,
+                            self.graph.MODEL_NAME,
+                        )
+                    else:
+                        run.assert_not_awaited()
+
+    async def test_shutdown_cancels_naming_and_leaves_it_retryable(self):
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def slow(text):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        self.manager.title_generator = slow
+        await self.say(1, "讨论任务关闭")
+        await asyncio.wait_for(started.wait(), 2)
+        await self.context.stop_title_tasks()
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(self.manager._title_tasks, {})
+        self.assertEqual(
+            (await self.manager.get_active_session(self.scope)).title, "新会话"
+        )
+        self.manager.title_generator = AsyncMock(return_value="任务关闭处理")
+        await self.say(2, "继续讨论")
+        await self.wait_for_titles()
+        self.assertEqual(
+            (await self.manager.get_active_session(self.scope)).title, "任务关闭处理"
         )
 
     async def test_new_resume_user_and_bot_messages_and_shared_group_pointer(self):

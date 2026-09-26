@@ -10,12 +10,22 @@
 | 引用已登记消息并提问 | 切换到消息所在会话的最新进度 |
 | 只引用已登记消息、不填写正文 | 切换并确认，不调用模型 |
 | 引用消息并发送 `/quote 问题` | 在当前会话讨论引用内容，不切换、不合并源会话 |
-| `/session current` | 查看当前会话编号 |
+| `/session current` | 查看当前会话编号与标题 |
 | `/session list` | 查看本聊天最近 10 个会话 |
 | `/session use ABC123` | 切换到指定编号，可带 `#` |
 | 引用消息并发送 `/session use` | 仅切换到其会话 |
 
 群成员共享当前会话。不同 Bot、群和私聊之间隔离。没有登记的历史消息不能恢复所属会话；仅在底层提供的信息能验证本聊天来源时，才作为引用资料使用。跨会话引用只引入选中消息的内容快照，原消息归属保持不变。
+
+## 自动命名
+
+未指定标题的会话先显示“新会话”。首轮成功回复后，后台调用 LLM 根据本会话的对话内容生成简短中文标题，最多 24 个字符；`/session current` 和 `/session list` 会显示生成后的标题。命名不阻塞聊天或会话切换，不发送额外通知，也不写入聊天历史。
+
+命名输入最多包含前三轮成功对话和两份已注入资料的文本摘录，总计不超过 6000 个字符；不会发送图片、附件原始数据、工具调用结果或模型推理内容。仅从当前会话读取，跨会话引用只使用已写入当前轮次的选中消息内容。
+
+每个会话成功命名一次。超时、接口失败或空标题保留占位标题，下一轮成功对话时重试；重启后也保持这一行为。空会话、控制命令和失败的对话不会触发命名。通过 `create_session(title=...)` 指定的业务标题（例如早报、Tibo 推送和私信通知）保持原值。
+
+标题和命名状态保存在 SQLite 中，旧版数据库自动升级。已有未命名会话在下一轮成功对话后补命名，不在启动时批量调用模型。`ConversationRef` 是标题的快照，读取最新标题可调用 `get_active_session`、`find_session` 或 `list_sessions`；标题变化不影响会话身份和已有消息关联。
 
 ## 添加非消息资料
 
@@ -112,6 +122,9 @@ await manager.bind_message(
 | `sunny_agent_context_entry_max_chars` | 12000 | 外部资料/引用的默认展示长度 |
 | `sunny_agent_context_turn_timeout_seconds` | 300 | 输入构建和模型运行超时 |
 | `sunny_agent_context_send_timeout_seconds` | 60 | 单次发送超时 |
+| `sunny_agent_context_auto_title_enabled` | true | 启用后台会话自动命名 |
+| `sunny_agent_context_title_model` | 空字符串 | 命名模型；留空复用 `SUNNY_AGENT_MODEL`，始终使用现有 API 地址和密钥 |
+| `sunny_agent_context_title_timeout_seconds` | 30 | 单次命名调用超时 |
 
 预算使用文本 UTF-8 长度和图片额度作保守估算，并非模型专用 tokenizer；不包含模型运行中后来产生的所有工具输出。历史按完整轮次选择，工具调用与结果不会被单独裁掉。长资料原文仍保存，可通过只读 `read_context` 工具分段读取。现有 `SUNNY_AGENT_MAX_TURNS` 仍用于控制单次 Runner 执行步数。
 

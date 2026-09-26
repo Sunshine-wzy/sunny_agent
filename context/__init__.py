@@ -30,6 +30,17 @@ __all__ = [
 _manager: ConversationManager | None = None
 
 
+async def _generate_title(text: str) -> str:
+    from ..graph import generate_conversation_title
+
+    return await generate_conversation_title(text)
+
+
+async def stop_title_tasks() -> None:
+    if _manager is not None:
+        await _manager.cancel_title_tasks()
+
+
 def get_manager() -> ConversationManager:
     global _manager
     if _manager is None:
@@ -44,5 +55,11 @@ def get_manager() -> ConversationManager:
             max_input_tokens=config.sunny_agent_context_max_input_tokens,
             recent_turns=config.sunny_agent_context_recent_turns,
             entry_max_chars=config.sunny_agent_context_entry_max_chars,
+            title_generator=(
+                _generate_title
+                if config.sunny_agent_context_auto_title_enabled
+                else None
+            ),
+            title_timeout_seconds=config.sunny_agent_context_title_timeout_seconds,
         )
     return _manager

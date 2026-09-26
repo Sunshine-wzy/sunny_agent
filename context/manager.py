@@ -2,11 +2,12 @@
 
 import asyncio
 import json
+import logging
 import uuid
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
+from contextvars import Context, ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -22,8 +23,11 @@ from .models import (
     SourceInfo,
     TurnContext,
 )
+from .naming import build_title_input, normalize_title
 from .session import ConversationSession
 from .store import ContextStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,11 +44,16 @@ class ConversationManager:
         max_input_tokens: int = 24000,
         recent_turns: int = 20,
         entry_max_chars: int = 12000,
+        title_generator: Callable[[str], Awaitable[str]] | None = None,
+        title_timeout_seconds: float = 30.0,
     ) -> None:
         self.store = ContextStore(path)
         self.max_input_tokens = max_input_tokens
         self.recent_turns = recent_turns
         self.entry_max_chars = entry_max_chars
+        self.title_generator = title_generator
+        self.title_timeout_seconds = title_timeout_seconds
+        self._title_tasks: dict[str, asyncio.Task[None]] = {}
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
@@ -90,7 +99,45 @@ class ConversationManager:
                 source_key,
                 idempotency_key or uuid.uuid4().hex,
                 activate,
+                not title,
             )
+
+    def schedule_title(self, conversation: ConversationRef) -> None:
+        """Start at most one naming task per conversation without holding its lock."""
+        key = conversation.conversation_id
+        if self.title_generator is None or key in self._title_tasks:
+            return
+        task = asyncio.create_task(
+            self._generate_title(conversation), context=Context()
+        )
+        self._title_tasks[key] = task
+        task.add_done_callback(lambda _: self._title_tasks.pop(key, None))
+
+    async def _generate_title(self, conversation: ConversationRef) -> None:
+        try:
+            entries = await self.call("title_entries", conversation)
+            text = build_title_input(entries)
+            if not text or self.title_generator is None:
+                return
+            title = normalize_title(
+                await asyncio.wait_for(
+                    self.title_generator(text), timeout=self.title_timeout_seconds
+                )
+            )
+            await self.call("set_generated_title", conversation, title)
+        except Exception:
+            # Keep pending so a later successful chat turn can retry.
+            logger.warning(
+                "Conversation title generation failed: %s",
+                conversation.conversation_id,
+                exc_info=True,
+            )
+
+    async def cancel_title_tasks(self) -> None:
+        tasks = list(self._title_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def get_active_session(self, scope: Scope) -> ConversationRef:
         async with self.operation(scope):
