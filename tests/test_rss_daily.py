@@ -156,7 +156,7 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
         self.generate.assert_awaited_once()
         self.assertEqual(self.bot.send_group_msg.await_count, 2)
 
-    async def test_incomplete_report_batch_skips_commentary(self) -> None:
+    async def test_incomplete_report_batch_still_sends_commentary(self) -> None:
         with patch.object(
             self.rss,
             "send_item_to_group",
@@ -170,7 +170,82 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result, (1, True))
         self.assertEqual(self.state.sent_item_ids["123"], ["old"])
+        self.generate.assert_awaited_once()
+        prompt = self.generate.call_args.args[0]
+        self.assertIn("早报 old", prompt)
+        self.assertIn("评测 new", prompt)
+
+    async def test_failed_forward_still_sends_commentary_using_full_report(
+        self,
+    ) -> None:
+        self.bot.call_api.side_effect = self.rss.ActionFailed(
+            status="failed",
+            retcode=1200,
+            message="发送转发消息失败",
+        )
+        result = await self.rss.send_items_to_group(
+            123,
+            [self.item("new"), self.item("old")],
+            self.state,
+            preferred_bot=self.bot,
+        )
+        # Failed detail delivery remains retryable and does not count as complete.
+        self.assertEqual(result, (0, False))
+        self.assertEqual(self.state.sent_item_ids["123"], [])
+        self.generate.assert_awaited_once()
+        prompt = self.generate.call_args.args[0]
+        self.assertIn("模型开放 old", prompt)
+        self.assertIn("评测 old", prompt)
+        self.assertNotIn("早报 new", prompt)
+        self.assertEqual(
+            [entry[0] for entry in self.bot.mock_calls],
+            ["send_group_msg", "call_api", "send_group_msg"],
+        )
+        self.assertEqual(
+            self.bot.send_group_msg.call_args.kwargs["message"].extract_plain_text(),
+            f"【Sunny 的早报看法】\n{self.commentary}",
+        )
+
+    async def test_failed_overview_does_not_generate_commentary(self) -> None:
+        self.bot.send_group_msg.side_effect = self.rss.ActionFailed(
+            status="failed",
+            retcode=1200,
+            message="发送消息失败",
+        )
+        result = await self.rss.send_items_to_group(
+            123,
+            [self.item("new")],
+            self.state,
+        )
+        self.assertEqual(result, (0, False))
         self.generate.assert_not_awaited()
+        self.bot.call_api.assert_not_awaited()
+
+    async def test_later_failed_overview_does_not_suppress_earlier_commentary(
+        self,
+    ) -> None:
+        self.bot.send_group_msg.side_effect = [
+            {},
+            self.rss.ActionFailed(
+                status="failed", retcode=1200, message="发送消息失败"
+            ),
+            {},
+        ]
+        result = await self.rss.send_items_to_group(
+            123,
+            [self.item("new"), self.item("old")],
+            self.state,
+        )
+        self.assertEqual(result, (1, True))
+        self.assertEqual(self.state.sent_item_ids["123"], ["old"])
+        self.generate.assert_awaited_once()
+        prompt = self.generate.call_args.args[0]
+        self.assertIn("评测 old", prompt)
+        self.assertNotIn("早报 new", prompt)
+        self.assertEqual(
+            self.bot.send_group_msg.call_args.kwargs["message"].extract_plain_text(),
+            f"【Sunny 的早报看法】\n{self.commentary}",
+        )
 
     async def test_empty_output_or_model_error_keeps_report_success(self) -> None:
         for output in ("", RuntimeError("model unavailable")):

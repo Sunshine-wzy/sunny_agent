@@ -953,15 +953,17 @@ async def send_items_to_group(
 
     sent_count = 0
     state_changed = False
-    sent_message_to_group = False
+    commentary_items: list[FeedItem] = []
     for item in reversed(selected_items):
         sent_item, sent_any = await send_item_to_group(
             group_id,
             item,
             preferred_bot=preferred_bot,
-            wait_before_first=sent_message_to_group,
+            wait_before_first=bool(commentary_items),
         )
-        sent_message_to_group = sent_message_to_group or sent_any
+        # An overview is enough to allow commentary if forwarding later fails.
+        if sent_any:
+            commentary_items.append(item)
 
         if not sent_item:
             break
@@ -969,10 +971,10 @@ async def send_items_to_group(
         sent_count += 1
         state_changed = mark_item_sent(state, group_id, item.item_id) or state_changed
 
-    if sent_count and sent_count == len(selected_items):
+    if commentary_items:
         await send_ai_daily_commentary(
             group_id,
-            list(reversed(selected_items)),
+            commentary_items,
             preferred_bot=preferred_bot,
         )
 
