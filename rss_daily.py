@@ -27,12 +27,14 @@ from nonebot.adapters.onebot.v11.exception import (
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
+from .chat import acomment_ai_daily
 from .config import Config
 
 JOB_ID = "sunny_agent_ai_daily_rss"
 STATE_FILE = store.get_data_file("sunny_agent", "ai_daily_rss_state.json")
 USER_AGENT = "sunny-agent/1.0"
 FORWARD_MESSAGE_BATCH_SIZE = 10
+COMMENTARY_TIMEOUT_SECONDS = 120
 IMAGE_PLACEHOLDER_RE = re.compile(
     r"\[\[sunny-rss-image:([A-Za-z0-9_-]+={0,2})\]\]",
 )
@@ -902,6 +904,37 @@ async def send_item_to_group(
     return True, sent_any
 
 
+async def send_ai_daily_commentary(
+    group_id: int,
+    items: list[FeedItem],
+    *,
+    preferred_bot: Bot | None = None,
+) -> None:
+    # Include the full reports, not just the introductory direct messages.
+    content = "\n\n".join(
+        IMAGE_PLACEHOLDER_RE.sub(IMAGE_LENGTH_PLACEHOLDER, format_item(item))
+        for item in items
+    )
+    try:
+        commentary = await asyncio.wait_for(
+            acomment_ai_daily(content),
+            timeout=COMMENTARY_TIMEOUT_SECONDS,
+        )
+        if not commentary:
+            logger.warning(f"Empty AI daily commentary for group {group_id}.")
+            return
+
+        await wait_between_messages()
+        await send_group_text(
+            group_id,
+            f"【Sunny 的早报看法】\n{commentary}",
+            preferred_bot=preferred_bot,
+        )
+    except Exception:  # noqa: BLE001
+        # Commentary is best effort; keep the successfully sent reports recorded.
+        logger.exception(f"Failed to send AI daily commentary to group {group_id}.")
+
+
 async def send_items_to_group(
     group_id: int,
     items: list[FeedItem],
@@ -935,6 +968,13 @@ async def send_items_to_group(
 
         sent_count += 1
         state_changed = mark_item_sent(state, group_id, item.item_id) or state_changed
+
+    if sent_count and sent_count == len(selected_items):
+        await send_ai_daily_commentary(
+            group_id,
+            list(reversed(selected_items)),
+            preferred_bot=preferred_bot,
+        )
 
     return sent_count, state_changed
 

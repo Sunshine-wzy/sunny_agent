@@ -9,6 +9,7 @@ from agents import RunConfig, Runner
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment, PrivateMessageEvent
 
 from .graph import (
+    ai_daily_commentator_agent,
     model_provider,
     run_group_chat,
     run_private_chat,
@@ -277,6 +278,19 @@ async def atranslate_to_chinese(text: str) -> str:
         run_config=RunConfig(
             model_provider=model_provider,
             workflow_name="Tibo post translation",
+        ),
+    )
+    return str(result.final_output or "").strip()
+
+
+async def acomment_ai_daily(text: str) -> str:
+    result = await Runner.run(
+        ai_daily_commentator_agent,
+        text,
+        max_turns=1,
+        run_config=RunConfig(
+            model_provider=model_provider,
+            workflow_name="Sunny AI daily commentary",
         ),
     )
     return str(result.final_output or "").strip()
