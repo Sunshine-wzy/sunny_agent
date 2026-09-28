@@ -312,11 +312,11 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result, (1, True))
                 self.assertEqual(state.sent_item_ids["123"], ["new"])
 
-    async def test_scheduled_push_continues_to_other_groups_and_saves_state(
+    async def test_scheduled_generation_failure_is_not_retried_per_group(
         self,
     ) -> None:
         self.state.enabled_group_ids.add(456)
-        self.generate.side_effect = [RuntimeError("model unavailable"), self.commentary]
+        self.generate.side_effect = RuntimeError("model unavailable")
         with (
             patch.object(self.rss, "load_state", return_value=self.state),
             patch.object(
@@ -331,7 +331,154 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
         save.assert_called_once_with(self.state)
         self.assertEqual(self.state.sent_item_ids, {"123": ["new"], "456": ["new"]})
         self.assertEqual(self.bot.send_group_msg.call_args.kwargs["group_id"], 456)
+        self.generate.assert_awaited_once()
+        self.assertEqual(self.bot.send_group_msg.await_count, 2)
+
+    async def push_reports(self, items: list["FeedItem"]) -> None:
+        with (
+            patch.object(self.rss, "load_state", return_value=self.state),
+            patch.object(
+                self.rss,
+                "fetch_ai_daily_items",
+                new_callable=AsyncMock,
+                return_value=items,
+            ),
+            patch.object(self.rss, "save_state"),
+        ):
+            await self.rss.push_ai_daily_rss()
+
+    async def test_scheduled_push_generates_once_and_sends_in_group_order(self) -> None:
+        self.state.enabled_group_ids.add(456)
+        await self.push_reports([self.item("new")])
+
+        self.generate.assert_awaited_once()
+        self.assertEqual(
+            [(entry[0], entry.kwargs["group_id"]) for entry in self.bot.mock_calls],
+            [
+                ("send_group_msg", 123),
+                ("call_api", 123),
+                ("send_group_msg", 123),
+                ("send_group_msg", 456),
+                ("call_api", 456),
+                ("send_group_msg", 456),
+            ],
+        )
+        for call in self.bot.send_group_msg.call_args_list[1::2]:
+            self.assertEqual(
+                call.kwargs["message"].extract_plain_text(), self.commentary
+            )
+        self.assertEqual(self.state.sent_item_ids, {"123": ["new"], "456": ["new"]})
+
+        # Each group still gets its own context entry and message binding.
+        manager = self.context.get_manager()
+        for group_id, message_id in ((123, 1003), (456, 1006)):
+            binding = await manager.lookup_message(
+                self.context.Scope("42", "group", str(group_id)),
+                message_id,
+            )
+            self.assertIsNotNone(binding)
+            self.assertEqual(binding.content.plain_text(), self.commentary)
+            entries = await manager.call("entries", binding.conversation)
+            self.assertEqual(
+                [entry["kind"] for entry in entries],
+                ["external", "assistant_publication"],
+            )
+
+    async def test_different_group_progress_reuses_the_same_full_report_commentary(
+        self,
+    ) -> None:
+        self.state.enabled_group_ids.add(456)
+        self.state.sent_item_ids["123"] = ["old"]
+        await self.push_reports([self.item("new"), self.item("old")])
+
+        self.generate.assert_awaited_once()
+        prompt = self.generate.call_args.args[0]
+        self.assertIn("评测 old", prompt)
+        self.assertIn("评测 new", prompt)
+        self.assertEqual(
+            [
+                call.kwargs["group_id"]
+                for call in self.bot.send_group_msg.call_args_list
+                if call.kwargs["message"].extract_plain_text() == self.commentary
+            ],
+            [123, 456],
+        )
+
+    async def test_failed_forward_does_not_regenerate_for_the_next_group(self) -> None:
+        self.state.enabled_group_ids.add(456)
+        self.bot.call_api.side_effect = [
+            ActionFailed(status="failed", retcode=1200),
+            {"message_id": 5000},
+            {"message_id": 5001},
+        ]
+        await self.push_reports([self.item("new"), self.item("old")])
+
+        self.generate.assert_awaited_once()
+        self.assertEqual(self.state.sent_item_ids, {"123": [], "456": ["old", "new"]})
+        self.assertEqual(
+            [
+                call.kwargs["group_id"]
+                for call in self.bot.send_group_msg.call_args_list
+                if call.kwargs["message"].extract_plain_text() == self.commentary
+            ],
+            [123, 456],
+        )
+
+    async def test_commentary_send_failure_does_not_regenerate_for_next_group(
+        self,
+    ) -> None:
+        self.state.enabled_group_ids.add(456)
+        self.bot.send_group_msg.side_effect = [
+            {"message_id": 2001},
+            ActionFailed(status="failed", retcode=1200),
+            {"message_id": 2002},
+            {"message_id": 2003},
+        ]
+        await self.push_reports([self.item("new")])
+
+        self.generate.assert_awaited_once()
+        for call in self.bot.send_group_msg.call_args_list[1::2]:
+            self.assertEqual(
+                call.kwargs["message"].extract_plain_text(), self.commentary
+            )
+        self.assertEqual(self.bot.send_group_msg.call_args.kwargs["group_id"], 456)
+
+    async def test_saved_commentary_can_be_reused_for_other_groups(self) -> None:
+        await self.rss.send_items_to_group(123, [self.item("new")], self.state)
+        self.state = self.rss.AiDailyRssState({}, {123, 456}, set())
+        await self.push_reports([self.item("new")])
+
+        self.generate.assert_awaited_once()
+        self.assertEqual(self.bot.send_group_msg.await_count, 4)
+        self.assertEqual(
+            self.bot.send_group_msg.call_args.kwargs["message"].extract_plain_text(),
+            self.commentary,
+        )
+
+    async def test_scheduled_push_without_new_reports_skips_generation(self) -> None:
+        self.state.enabled_group_ids.add(456)
+        self.state.sent_item_ids = {"123": ["new"], "456": ["new"]}
+        await self.push_reports([self.item("new")])
+
+        self.generate.assert_not_awaited()
+        self.bot.send_group_msg.assert_not_awaited()
+        self.bot.call_api.assert_not_awaited()
+
+    async def test_next_scheduled_push_generates_new_commentary(self) -> None:
+        self.state.enabled_group_ids.add(456)
+        next_commentary = "今天这条新消息还挺有意思。"
+        self.generate.side_effect = [self.commentary, next_commentary]
+        await self.push_reports([self.item("old")])
+        await self.push_reports([self.item("new")])
+
         self.assertEqual(self.generate.await_count, 2)
+        self.assertEqual(
+            [
+                call.kwargs["message"].extract_plain_text()
+                for call in self.bot.send_group_msg.call_args_list[1::2]
+            ],
+            [self.commentary, self.commentary, next_commentary, next_commentary],
+        )
 
     async def test_commentator_reuses_model_without_chat_session_or_tools(self) -> None:
         with patch.object(

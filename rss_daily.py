@@ -59,6 +59,13 @@ class FeedItem:
 
 
 @dataclass(slots=True)
+class AiDailyCommentary:
+    items: list[FeedItem]
+    # None means not attempted; an empty string also caches generation failures.
+    text: str | None = None
+
+
+@dataclass(slots=True)
 class AiDailyRssState:
     sent_item_ids: dict[str, list[str]]
     enabled_group_ids: set[int]
@@ -880,7 +887,7 @@ async def send_item_to_group(
 
 async def send_ai_daily_commentary(
     group_id: int,
-    items: list[FeedItem],
+    batch: AiDailyCommentary,
     *,
     preferred_bot: Bot | None = None,
     publication: Publication | None = None,
@@ -888,11 +895,11 @@ async def send_ai_daily_commentary(
     # Include the full reports, not just the introductory direct messages.
     content = "\n\n".join(
         IMAGE_PLACEHOLDER_RE.sub(IMAGE_LENGTH_PLACEHOLDER, format_item(item))
-        for item in items
+        for item in batch.items
     )
     try:
         if publication is None:
-            publication = make_rss_publication(items, only_unsent=False)
+            publication = make_rss_publication(batch.items, only_unsent=False)
         part_key = f"commentary:{content_hash(content)}"
         bots = connected_onebot_bots(preferred_bot)
         commentary = (
@@ -901,10 +908,15 @@ async def send_ai_daily_commentary(
             else None
         )
         if commentary is None:
-            commentary = await asyncio.wait_for(
-                acomment_ai_daily(content),
-                timeout=COMMENTARY_TIMEOUT_SECONDS,
-            )
+            if batch.text is None:
+                batch.text = ""
+                batch.text = await asyncio.wait_for(
+                    acomment_ai_daily(content),
+                    timeout=COMMENTARY_TIMEOUT_SECONDS,
+                )
+            commentary = batch.text
+        elif batch.text is None:
+            batch.text = commentary
         if not commentary:
             logger.warning(f"Empty AI daily commentary for group {group_id}.")
             return
@@ -923,13 +935,14 @@ async def send_ai_daily_commentary(
         logger.exception(f"Failed to send AI daily commentary to group {group_id}.")
 
 
-async def send_items_to_group(
+async def send_items_to_group(  # noqa: PLR0913
     group_id: int,
     items: list[FeedItem],
     state: AiDailyRssState,
     *,
     preferred_bot: Bot | None = None,
     only_unsent: bool = True,
+    commentary_batch: AiDailyCommentary | None = None,
 ) -> tuple[int, bool]:
     group_key = str(group_id)
     sent_item_ids = state.sent_item_ids.setdefault(group_key, [])
@@ -964,7 +977,7 @@ async def send_items_to_group(
     if commentary_items:
         await send_ai_daily_commentary(
             group_id,
-            commentary_items,
+            commentary_batch or AiDailyCommentary(commentary_items),
             preferred_bot=preferred_bot,
             publication=publication,
         )
@@ -1017,9 +1030,15 @@ async def push_ai_daily_rss() -> None:
         return
 
     state_changed = False
+    # Use one report set and one model result throughout this scheduled push.
+    commentary_batch = AiDailyCommentary(
+        list(reversed(items[: plugin_config.sunny_agent_ai_daily_max_items]))
+    )
 
     for group_id in group_ids:
-        _, group_state_changed = await send_items_to_group(group_id, items, state)
+        _, group_state_changed = await send_items_to_group(
+            group_id, items, state, commentary_batch=commentary_batch
+        )
         state_changed = state_changed or group_state_changed
 
     if state_changed:
