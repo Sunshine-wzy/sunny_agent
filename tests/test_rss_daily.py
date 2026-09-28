@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
@@ -349,7 +350,28 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scheduled_push_generates_once_and_sends_in_group_order(self) -> None:
         self.state.enabled_group_ids.add(456)
-        await self.push_reports([self.item("new")])
+        builders = (
+            "make_rss_publication",
+            "format_item_direct_message",
+            "format_item_forward_messages",
+            "split_messages",
+            "make_forward_nodes",
+        )
+        with ExitStack() as stack:
+            spies = {
+                name: stack.enter_context(
+                    patch.object(self.rss, name, wraps=getattr(self.rss, name))
+                )
+                for name in (*builders, "rss_text_to_message")
+            }
+            await self.push_reports([self.item("new")])
+
+        for name in builders:
+            spies[name].assert_called_once()
+        converted_texts = [
+            call.args[0] for call in spies["rss_text_to_message"].call_args_list
+        ]
+        self.assertEqual(len(converted_texts), len(set(converted_texts)))
 
         self.generate.assert_awaited_once()
         self.assertEqual(
@@ -383,6 +405,117 @@ class AiDailyCommentaryTests(unittest.IsolatedAsyncioTestCase):
                 [entry["kind"] for entry in entries],
                 ["external", "assistant_publication"],
             )
+
+    async def test_long_reports_reuse_chunks_and_forward_batches_across_groups(
+        self,
+    ) -> None:
+        self.state.enabled_group_ids.add(456)
+        item = self.item("long")
+        item.content = (
+            "# 摘要\n"
+            + "摘要内容" * 300
+            + "\n"
+            + "\n".join(f"# 新闻 {index}\n" + "详细内容" * 160 for index in range(12))
+        )
+        self.rss.plugin_config.sunny_agent_ai_daily_message_max_chars = 500
+        with (
+            patch.object(
+                self.rss, "make_forward_nodes", wraps=self.rss.make_forward_nodes
+            ) as nodes,
+            patch.object(
+                self.rss, "split_messages", wraps=self.rss.split_messages
+            ) as split,
+        ):
+            await self.push_reports([item])
+
+        split.assert_called_once()
+        direct_by_group = [
+            [
+                call.kwargs["message"]
+                for call in self.bot.send_group_msg.call_args_list
+                if call.kwargs["group_id"] == group_id
+            ]
+            for group_id in (123, 456)
+        ]
+        forwards_by_group = [
+            [
+                call.kwargs["messages"]
+                for call in self.bot.call_api.call_args_list
+                if call.kwargs["group_id"] == group_id
+            ]
+            for group_id in (123, 456)
+        ]
+        self.assertGreater(len(direct_by_group[0]), 2)
+        self.assertGreater(len(forwards_by_group[0]), 1)
+        self.assertEqual(direct_by_group[0], direct_by_group[1])
+        self.assertEqual(forwards_by_group[0], forwards_by_group[1])
+        self.assertEqual(nodes.call_count, len(forwards_by_group[0]))
+        for message in direct_by_group[0][:-1]:
+            self.assertLessEqual(len(message.extract_plain_text()), 500)
+        for batch in forwards_by_group[0]:
+            self.assertLessEqual(len(batch), self.rss.FORWARD_MESSAGE_BATCH_SIZE)
+            for node in batch:
+                self.assertLessEqual(
+                    len(node.data["content"].extract_plain_text()), 500
+                )
+
+    async def test_forward_templates_are_reused_per_sending_account(self) -> None:
+        self.state.enabled_group_ids.add(456)
+        self.bot.call_api.side_effect = ActionFailed(status="failed", retcode=1200)
+        fallback = Mock(
+            self_id="43",
+            call_api=AsyncMock(return_value={"message_id": 5000}),
+        )
+        with (
+            patch.object(
+                self.rss, "connected_onebot_bots", return_value=[self.bot, fallback]
+            ),
+            patch.object(
+                self.rss, "make_forward_nodes", wraps=self.rss.make_forward_nodes
+            ) as nodes,
+        ):
+            await self.push_reports([self.item("new")])
+
+        self.assertEqual(nodes.call_count, 2)
+        self.assertEqual(
+            [call.args[0].self_id for call in nodes.call_args_list], ["42", "43"]
+        )
+        for bot in (self.bot, fallback):
+            self.assertEqual(bot.call_api.await_count, 2)
+            for call in bot.call_api.call_args_list:
+                self.assertTrue(
+                    all(
+                        node.data["user_id"] == bot.self_id
+                        for node in call.kwargs["messages"]
+                    )
+                )
+        for group_id in (123, 456):
+            self.assertIsNotNone(
+                await self.context.get_manager().lookup_message(
+                    self.context.Scope("43", "group", str(group_id)),
+                    5000,
+                )
+            )
+        self.assertEqual(self.state.sent_item_ids, {"123": ["new"], "456": ["new"]})
+
+    async def test_next_push_rebuilds_templates_for_updated_report_content(
+        self,
+    ) -> None:
+        self.state.enabled_group_ids.add(456)
+        item = self.item("new")
+        await self.push_reports([item])
+        self.bot.reset_mock()
+        self.state.sent_item_ids.clear()
+        item.content = item.content.replace("摘要 new", "更新后的摘要").replace(
+            "评测 new",
+            "更新后的评测",
+        )
+        await self.push_reports([item])
+
+        for call in self.bot.send_group_msg.call_args_list[::2]:
+            self.assertIn("更新后的摘要", call.kwargs["message"].extract_plain_text())
+        for call in self.bot.call_api.call_args_list:
+            self.assertIn("更新后的评测", str(call.kwargs["messages"]))
 
     async def test_different_group_progress_reuses_the_same_full_report_commentary(
         self,

@@ -8,7 +8,7 @@ import re
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -70,6 +70,62 @@ class AiDailyRssState:
     sent_item_ids: dict[str, list[str]]
     enabled_group_ids: set[int]
     disabled_group_ids: set[int]
+
+
+@dataclass(slots=True)
+class RssPublication(Publication):
+    # Templates live for one push; delivery state remains scoped to each group.
+    text_messages: dict[str, tuple[Message, ContextContent]] = field(
+        default_factory=dict
+    )
+    direct_chunks: dict[str, list[str]] = field(default_factory=dict)
+    forward_sections: dict[str, list[str]] = field(default_factory=dict)
+    forward_batches: dict[tuple[str, ...], list[list[str]]] = field(
+        default_factory=dict
+    )
+    forward_nodes: dict[tuple[str, tuple[str, ...]], Message] = field(
+        default_factory=dict
+    )
+
+    def text_message(self, text: str) -> tuple[Message, ContextContent]:
+        if text not in self.text_messages:
+            outgoing = rss_text_to_message(text)
+            self.text_messages[text] = outgoing, message_content(outgoing)
+        return self.text_messages[text]
+
+    def item_direct_chunks(self, item: FeedItem) -> list[str]:
+        if item.item_id not in self.direct_chunks:
+            self.direct_chunks[item.item_id] = split_message(
+                format_item_direct_message(item),
+                plugin_config.sunny_agent_ai_daily_message_max_chars,
+            )
+        return self.direct_chunks[item.item_id]
+
+    def item_forward_sections(self, item: FeedItem) -> list[str]:
+        if item.item_id not in self.forward_sections:
+            self.forward_sections[item.item_id] = format_item_forward_messages(item)
+        return self.forward_sections[item.item_id]
+
+    def split_forward_batches(self, messages: list[str]) -> list[list[str]]:
+        key = tuple(messages)
+        if key not in self.forward_batches:
+            self.forward_batches[key] = batch_messages(
+                split_messages(
+                    messages,
+                    plugin_config.sunny_agent_ai_daily_message_max_chars,
+                ),
+                FORWARD_MESSAGE_BATCH_SIZE,
+            )
+        return self.forward_batches[key]
+
+    def forward_message(self, bot: Bot, messages: list[str]) -> Message:
+        # Node author IDs depend on the actual sending account, not the group.
+        key = str(bot.self_id), tuple(messages)
+        if key not in self.forward_nodes:
+            self.forward_nodes[key] = make_forward_nodes(
+                bot, [self.text_message(text)[0] for text in messages]
+            )
+        return self.forward_nodes[key]
 
 
 class HtmlToTextParser(HTMLParser):
@@ -723,12 +779,12 @@ async def send_group_text(
     message: str,
     *,
     preferred_bot: Bot | None = None,
-    publication: Publication | None = None,
+    publication: RssPublication | None = None,
     part_key: str = "text",
     commentary: bool = False,
 ) -> DeliveryResult:
     if publication is None:
-        publication = Publication(
+        publication = RssPublication(
             f"rss-message:{content_hash(message)}",
             "AI 早报",
             [
@@ -738,14 +794,14 @@ async def send_group_text(
                 ),
             ],
         )
+    outgoing, visible = publication.text_message(message)
     result = DeliveryResult("", "failed", error="No connected bots")
     for bot in connected_onebot_bots(preferred_bot):
-        outgoing = rss_text_to_message(message)
         result = await publication.send(
             bot,
             group_id,
             outgoing,
-            message_content(outgoing),
+            visible,
             part_key=part_key,
             commentary=commentary,
         )
@@ -755,13 +811,13 @@ async def send_group_text(
     return result
 
 
-def make_forward_nodes(bot: Bot, messages: list[str]) -> Message:
+def make_forward_nodes(bot: Bot, messages: list[Message]) -> Message:
     return Message(
         [
             MessageSegment.node_custom(
                 user_id=int(bot.self_id),
                 nickname="AI 早报",
-                content=rss_text_to_message(message),
+                content=message,
             )
             for message in messages
         ],
@@ -773,23 +829,26 @@ async def send_group_forward_message_batch(
     messages: list[str],
     *,
     preferred_bot: Bot | None = None,
-    publication: Publication | None = None,
+    publication: RssPublication | None = None,
     part_key: str = "forward",
 ) -> DeliveryResult:
     if not messages:
         return DeliveryResult("", "confirmed")
-    visible = message_content(rss_text_to_message("\n\n".join(messages)))
     if publication is None:
-        publication = Publication(
+        publication = RssPublication(
             f"rss-forward:{content_hash(str(messages))}",
             "AI 早报",
             [
-                (SourceInfo("rss", content_hash(str(messages))), visible),
+                (
+                    SourceInfo("rss", content_hash(str(messages))),
+                    message_content(rss_text_to_message("\n\n".join(messages))),
+                ),
             ],
         )
+    _, visible = publication.text_message("\n\n".join(messages))
     result = DeliveryResult("", "failed", error="No connected bots")
     for bot in connected_onebot_bots(preferred_bot):
-        forward_nodes = make_forward_nodes(bot, messages)
+        forward_nodes = publication.forward_message(bot, messages)
         result = await publication.send(
             bot, group_id, forward_nodes, visible, part_key=part_key, forward=True
         )
@@ -806,17 +865,21 @@ async def send_group_forward_messages(
     messages: list[str],
     *,
     preferred_bot: Bot | None = None,
-    publication: Publication | None = None,
+    publication: RssPublication | None = None,
     part_key: str = "forward",
 ) -> bool:
-    forward_messages = split_messages(
-        messages,
-        plugin_config.sunny_agent_ai_daily_message_max_chars,
-    )
-    forward_message_batches = batch_messages(
-        forward_messages,
-        FORWARD_MESSAGE_BATCH_SIZE,
-    )
+    if publication is None:
+        publication = RssPublication(
+            f"rss-forward:{content_hash(str(messages))}",
+            "AI 早报",
+            [
+                (
+                    SourceInfo("rss", content_hash(str(messages))),
+                    message_content(rss_text_to_message("\n\n".join(messages))),
+                ),
+            ],
+        )
+    forward_message_batches = publication.split_forward_batches(messages)
 
     for index, forward_message_batch in enumerate(forward_message_batches):
         if index > 0:
@@ -840,18 +903,12 @@ async def send_item_to_group(
     *,
     preferred_bot: Bot | None = None,
     wait_before_first: bool = False,
-    publication: Publication | None = None,
+    publication: RssPublication | None = None,
 ) -> tuple[bool, bool]:
     if publication is None:
         publication = make_rss_publication([item], only_unsent=False)
     sent_any = False
-    direct_message = format_item_direct_message(item)
-    for index, chunk in enumerate(
-        split_message(
-            direct_message,
-            plugin_config.sunny_agent_ai_daily_message_max_chars,
-        )
-    ):
+    for index, chunk in enumerate(publication.item_direct_chunks(item)):
         if index > 0 or wait_before_first:
             await wait_between_messages()
             wait_before_first = False
@@ -866,7 +923,7 @@ async def send_item_to_group(
             return False, sent_any
         sent_any = True
 
-    forward_messages = format_item_forward_messages(item)
+    forward_messages = publication.item_forward_sections(item)
     if forward_messages:
         if sent_any or wait_before_first:
             await wait_between_messages()
@@ -890,7 +947,7 @@ async def send_ai_daily_commentary(
     batch: AiDailyCommentary,
     *,
     preferred_bot: Bot | None = None,
-    publication: Publication | None = None,
+    publication: RssPublication | None = None,
 ) -> None:
     # Include the full reports, not just the introductory direct messages.
     content = "\n\n".join(
@@ -943,11 +1000,13 @@ async def send_items_to_group(  # noqa: PLR0913
     preferred_bot: Bot | None = None,
     only_unsent: bool = True,
     commentary_batch: AiDailyCommentary | None = None,
+    publication: RssPublication | None = None,
 ) -> tuple[int, bool]:
     group_key = str(group_id)
     sent_item_ids = state.sent_item_ids.setdefault(group_key, [])
     selected_items = items[: plugin_config.sunny_agent_ai_daily_max_items]
-    publication = make_rss_publication(selected_items, only_unsent=only_unsent)
+    if publication is None:
+        publication = make_rss_publication(selected_items, only_unsent=only_unsent)
     if only_unsent:
         selected_items = [
             item for item in selected_items if item.item_id not in sent_item_ids
@@ -985,7 +1044,7 @@ async def send_items_to_group(  # noqa: PLR0913
     return sent_count, state_changed
 
 
-def make_rss_publication(items: list[FeedItem], *, only_unsent: bool) -> Publication:
+def make_rss_publication(items: list[FeedItem], *, only_unsent: bool) -> RssPublication:
     sources = [
         (
             SourceInfo(
@@ -1003,7 +1062,7 @@ def make_rss_publication(items: list[FeedItem], *, only_unsent: bool) -> Publica
         plugin_config.sunny_agent_ai_daily_rss_url
         + str(sorted(item.item_id for item in items))
     )
-    publication = Publication(
+    publication = RssPublication(
         source_key, "AI 早报 · " + ", ".join(item.title for item in items), sources
     )
     if only_unsent:
@@ -1030,14 +1089,18 @@ async def push_ai_daily_rss() -> None:
         return
 
     state_changed = False
-    # Use one report set and one model result throughout this scheduled push.
-    commentary_batch = AiDailyCommentary(
-        list(reversed(items[: plugin_config.sunny_agent_ai_daily_max_items]))
-    )
+    # Share message templates and one model result throughout this scheduled push.
+    selected_items = items[: plugin_config.sunny_agent_ai_daily_max_items]
+    publication = make_rss_publication(selected_items, only_unsent=True)
+    commentary_batch = AiDailyCommentary(list(reversed(selected_items)))
 
     for group_id in group_ids:
         _, group_state_changed = await send_items_to_group(
-            group_id, items, state, commentary_batch=commentary_batch
+            group_id,
+            items,
+            state,
+            commentary_batch=commentary_batch,
+            publication=publication,
         )
         state_changed = state_changed or group_state_changed
 
